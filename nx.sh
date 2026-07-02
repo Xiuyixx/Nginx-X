@@ -165,6 +165,7 @@ ensure_websocket_map() {
   fi
 
   # Skip if nginx.conf already defines the map (e.g. Alpine default config)
+  # shellcheck disable=SC2016  # $http_upgrade is literal nginx variable syntax, matched as-is
   if grep -qF 'map $http_upgrade' /etc/nginx/nginx.conf 2>/dev/null; then
     return 0
   fi
@@ -2769,6 +2770,8 @@ setup_dns_api() {
 
 export_dns_env() {
   load_dns_conf
+  # DNS_KEY1/DNS_KEY2 are sourced from $DNS_CONF by load_dns_conf; shellcheck can't see the assignment.
+  # shellcheck disable=SC2153
   case "${DNS_PROVIDER:-}" in
     cf) export CF_Token="${DNS_KEY1}" ;;
     dp) export DP_Id="${DNS_KEY1}"; export DP_Key="${DNS_KEY2}" ;;
@@ -2856,6 +2859,8 @@ _issue_cert_dns() {
   "$HOME/.acme.sh/acme.sh" --set-default-ca --server letsencrypt >/dev/null 2>&1 || true
   "$HOME/.acme.sh/acme.sh" --register-account -m "$ACME_EMAIL" >/dev/null 2>&1 || true
 
+  # dns_args holds acme.sh flags like "--dns dns_cf" and must word-split into two args.
+  # shellcheck disable=SC2086
   issue_output="$("$HOME/.acme.sh/acme.sh" --issue -d "$domain" $dns_args 2>&1)" || {
     echo "$issue_output"
     if echo "$issue_output" | grep -qi 'rateLimited\|too many certificates'; then
