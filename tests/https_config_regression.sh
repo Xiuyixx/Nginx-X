@@ -255,6 +255,29 @@ grep -q 'proxy_pass https://stream-b.example.com;' "$multi_stream_conf"
 grep -q "sub_filter 'https://stream-a.example.com' 'https://emby.example.com/s1';" "$multi_stream_conf"
 grep -q "sub_filter 'https://stream-b.example.com' 'https://emby.example.com/s2';" "$multi_stream_conf"
 
+# 回归：非标端口（如 8443）的 LilyEmby 方案，sub_filter / proxy_redirect 的重写目标必须带端口后缀，
+# 否则客户端在非 443 端口访问时拿到不可达地址，播放流量会绕过反代直连源站（见 issue #6）。
+nonstd_conf="$TMPDIR_ROOT/emby-lily-8443.conf"
+build_external_proxy_conf \
+  "emby.example.com" \
+  "8443" \
+  "https://main.example.com" \
+  "emby_lily" \
+  "$nonstd_conf" \
+  "1" \
+  "https://stream-a.example.com" \
+  "https://main.example.com" \
+  "" \
+  ""
+
+grep -q "return 301 https://\$host:8443\$request_uri;" "$nonstd_conf"
+grep -q "sub_filter 'https://main.example.com' 'https://emby.example.com:8443';" "$nonstd_conf"
+grep -q "sub_filter 'https://stream-a.example.com' 'https://emby.example.com:8443/s1';" "$nonstd_conf"
+grep -q "proxy_redirect https://stream-a.example.com https://emby.example.com:8443/s1/;" "$nonstd_conf"
+grep -q "proxy_redirect https://main.example.com https://emby.example.com:8443;" "$nonstd_conf"
+# 标准 443 端口不得带端口后缀
+grep -q "sub_filter 'https://stream-a.example.com' 'https://emby.example.com/s1';" "$multi_stream_conf"
+
 bad_conf="$TMPDIR_ROOT/bad.conf"
 cat > "$bad_conf" <<'EOF'
 server {
