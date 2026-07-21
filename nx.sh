@@ -345,7 +345,7 @@ nginx_local_version() {
 }
 
 probe_nginx_mirror() {
-  local path="${1:-/en/download.html}"
+  local path="${1:-/keys/nginx_signing.key}"
   local mirror
   for mirror in "${NGINX_MIRRORS[@]}"; do
     note "尝试连接镜像: ${mirror}"
@@ -358,16 +358,15 @@ probe_nginx_mirror() {
 }
 
 nginx_latest_version_online() {
-  local latest page mirror
-  for mirror in "${NGINX_MIRRORS[@]}"; do
-    note "检查 ${mirror}/en/download.html ..."
+  local latest page
+  page="$(curl -fsSL --connect-timeout 4 --max-time 8 \
+    -A 'Nginx-X version-check' \
+    https://nginx.org/en/download.html 2>/dev/null || true)"
+  if [[ -z "$page" ]]; then
     page="$(curl -fsSL --connect-timeout 4 --max-time 8 \
       -A 'Nginx-X version-check' \
-      "${mirror}/en/download.html" 2>/dev/null || true)"
-    if [[ -n "$page" ]]; then
-      break
-    fi
-  done
+      http://nginx.org/en/download.html 2>/dev/null || true)"
+  fi
 
   latest="$(printf '%s' "$page" | awk '
     /Stable version/ {in_stable=1; next}
@@ -636,12 +635,12 @@ upgrade_nginx_smart() {
   if [[ "$using_official_repo" == "1" ]]; then
     if [[ -z "$latest_ver" ]]; then
       # Try a quick curl probe to classify failure (best-effort)
-      local probe_rc=0 probe_mirror
-      for probe_mirror in "${NGINX_MIRRORS[@]}"; do
-        curl -fsSL --connect-timeout 4 --max-time 8 -A 'Nginx-X version-check' "${probe_mirror}/en/download.html" >/dev/null 2>&1 || probe_rc=$?
-        if [[ "$probe_rc" -eq 0 ]]; then break; fi
-      done
-      warn "无法获取官方最新版本（所有镜像源访问失败，最后错误：$(curl_error_hint "$probe_rc")），将改为直接通过包管理器检查并尝试升级。"
+      local probe_rc=0
+      curl -fsSL --connect-timeout 4 --max-time 8 -A 'Nginx-X version-check' https://nginx.org/en/download.html >/dev/null 2>&1 || probe_rc=$?
+      if [[ "$probe_rc" -ne 0 ]]; then
+        curl -fsSL --connect-timeout 4 --max-time 8 -A 'Nginx-X version-check' http://nginx.org/en/download.html >/dev/null 2>&1 || probe_rc=$?
+      fi
+      warn "无法获取官方最新版本（nginx.org 访问失败：$(curl_error_hint "$probe_rc")），将改为直接通过包管理器检查并尝试升级。"
       using_official_repo="0"
     else
       note "官方最新：${latest_ver}"
