@@ -1160,6 +1160,14 @@ build_external_proxy_conf() {
 
   upstream_host="$(url_host "$upstream_url")"
 
+  # 非标端口（非 443）时，重写回本机的目标 URL 必须带上端口后缀，
+  # 否则 sub_filter / proxy_redirect 会把推流地址改写成 https://domain（默认 443），
+  # 客户端在 8443 之类端口访问时拿到不可达地址，导致播放流量绕过反代直连源站。
+  local domain_port_suffix=""
+  if [[ "$listen_port" != "443" && "$listen_port" != "80" ]]; then
+    domain_port_suffix=":${listen_port}"
+  fi
+
   if [[ -n "$stream_upstream_urls" ]]; then
     stream_urls=()
     stream_urls_to_array "$stream_upstream_urls" stream_urls
@@ -1209,10 +1217,10 @@ BLOCK
         stream_url="${stream_urls[$idx]}"
         stream_path="/s$((idx + 1))/"
         stream_host_line="$(url_host "$stream_url")"
-        stream_redirect_block+="        proxy_redirect ${stream_url} https://${domain}${stream_path};"$'\n'
+        stream_redirect_block+="        proxy_redirect ${stream_url} https://${domain}${domain_port_suffix}${stream_path};"$'\n'
 
         if [[ "$external_mode" == "emby_lily" ]]; then
-          stream_lily_block+="        sub_filter '${stream_url}' 'https://${domain}${stream_path%/}';"$'\n'
+          stream_lily_block+="        sub_filter '${stream_url}' 'https://${domain}${domain_port_suffix}${stream_path%/}';"$'\n'
         fi
 
         stream_sni_block=""
@@ -1258,12 +1266,12 @@ EOF
       redirect_block="${stream_redirect_block%$'\n'}"
       if [[ "$external_mode" == "emby_lily" ]]; then
         redirect_block+=$'\n'
-        redirect_block+="        proxy_redirect ${source_site_url} https://${domain};"
+        redirect_block+="        proxy_redirect ${source_site_url} https://${domain}${domain_port_suffix};"
         base_lily_block=$(cat <<EOF
         proxy_set_header Accept-Encoding "";
         sub_filter_types application/json text/xml text/plain;
         sub_filter_once off;
-        sub_filter '${source_site_url}' 'https://${domain}';
+        sub_filter '${source_site_url}' 'https://${domain}${domain_port_suffix}';
 EOF
 )
         lily_block="${base_lily_block}"$'\n'"${stream_lily_block}"
