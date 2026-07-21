@@ -4227,6 +4227,7 @@ show_system_info() {
   echo "  内核     : $(uname -r)"
   echo "  架构     : $(uname -m)"
   echo "  运行时间 : $(uptime -p 2>/dev/null || uptime | sed 's/.*up */up /')"
+  echo "  系统 DNS  : $(awk '/^nameserver/ {printf "%s ", $2}' /etc/resolv.conf 2>/dev/null | sed 's/ $//')"
   echo ""
 
   echo "--- Nginx 信息 ---"
