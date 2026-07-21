@@ -4251,7 +4251,7 @@ show_system_info() {
   echo "--- acme.sh 信息 ---"
   load_email
   if [[ -x "$HOME/.acme.sh/acme.sh" ]]; then
-    echo "  acme.sh   : 已安装 ($($HOME/.acme.sh/acme.sh --version 2>/dev/null | head -1 || echo '版本未知'))"
+    echo "  acme.sh   : 已安装 ($("$HOME"/.acme.sh/acme.sh --version 2>/dev/null | head -1 || echo '版本未知'))"
     if [[ -n "${ACME_EMAIL:-}" ]]; then
       echo "  邮箱     : ${ACME_EMAIL}"
     else
