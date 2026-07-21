@@ -31,6 +31,15 @@ REPO_URL="https://github.com/Xiuyixx/Nginx-X.git"
 REPO_BRANCH="main"
 REPO_INSTALL_DIR="/opt/Nginx-X"
 
+NGINX_MIRRORS=(
+  "https://nginx.org"
+  "https://mirrors.tuna.tsinghua.edu.cn/nginx"
+  "https://mirrors.ustc.edu.cn/nginx"
+  "https://mirrors.aliyun.com/nginx"
+  "https://mirrors.cloud.tencent.com/nginx"
+  "https://mirrors.huaweicloud.com/nginx"
+)
+
 SUDO=""
 if [[ ${EUID:-$(id -u)} -ne 0 ]]; then
   SUDO="sudo"
@@ -335,22 +344,30 @@ nginx_local_version() {
   nginx -v 2>&1 | sed -E 's#^nginx version: nginx/##' || echo ""
 }
 
+probe_nginx_mirror() {
+  local path="${1:-/en/download.html}"
+  local mirror
+  for mirror in "${NGINX_MIRRORS[@]}"; do
+    note "尝试连接镜像: ${mirror}"
+    if curl -fsSL --connect-timeout 3 --max-time 6 -A 'Nginx-X mirror-probe' -o /dev/null "${mirror}${path}" 2>/dev/null; then
+      echo "$mirror"
+      return 0
+    fi
+  done
+  return 1
+}
+
 nginx_latest_version_online() {
-  # 使用 Nginx 官网下载页中的 stable 区块获取最新稳定版版本号
-  # 说明：部分环境可能无法访问 nginx.org（网络/IPv6/DNS/证书链等）。
-  # 该函数失败时应返回空字符串，由上层决定回退策略。
-  local latest page
-
-  page="$(curl -fsSL --connect-timeout 4 --max-time 8 \
-    -A 'Nginx-X version-check' \
-    https://nginx.org/en/download.html 2>/dev/null || true)"
-
-  # fallback: try http if https fails (some environments have TLS issues)
-  if [[ -z "$page" ]]; then
+  local latest page mirror
+  for mirror in "${NGINX_MIRRORS[@]}"; do
+    note "检查 ${mirror}/en/download.html ..."
     page="$(curl -fsSL --connect-timeout 4 --max-time 8 \
       -A 'Nginx-X version-check' \
-      http://nginx.org/en/download.html 2>/dev/null || true)"
-  fi
+      "${mirror}/en/download.html" 2>/dev/null || true)"
+    if [[ -n "$page" ]]; then
+      break
+    fi
+  done
 
   latest="$(printf '%s' "$page" | awk '
     /Stable version/ {in_stable=1; next}
@@ -478,12 +495,24 @@ install_nginx_official() {
       fi
 
       note "配置 Nginx 官方 stable 源..."
-      if ! curl -fsSL https://nginx.org/keys/nginx_signing.key | ${SUDO} gpg --dearmor -o /usr/share/keyrings/nginx-archive-keyring.gpg; then
+      local gpg_mirror repo_mirror gpg_ok
+      gpg_ok=0
+      for gpg_mirror in "${NGINX_MIRRORS[@]}"; do
+        note "尝试从 ${gpg_mirror} 下载签名密钥..."
+        if curl -fsSL --connect-timeout 6 --max-time 12 "${gpg_mirror}/keys/nginx_signing.key" | ${SUDO} gpg --dearmor -o /usr/share/keyrings/nginx-archive-keyring.gpg 2>/dev/null; then
+          gpg_ok=1
+          break
+        fi
+      done
+      if [[ "$gpg_ok" != "1" ]]; then
         error "下载或导入 Nginx 官方签名密钥失败。请检查网络连接后重试。"
         return 1
       fi
+
+      repo_mirror="$(probe_nginx_mirror "/packages/$(. /etc/os-release; echo "${ID}")" || echo "https://nginx.org")"
+      note "使用镜像源: ${repo_mirror}"
       # shellcheck disable=SC1091
-      echo "deb [signed-by=/usr/share/keyrings/nginx-archive-keyring.gpg] https://nginx.org/packages/$(. /etc/os-release; echo "${ID}") $(lsb_release -cs) nginx" | ${SUDO} tee /etc/apt/sources.list.d/nginx.list >/dev/null
+      echo "deb [signed-by=/usr/share/keyrings/nginx-archive-keyring.gpg] ${repo_mirror}/packages/$(. /etc/os-release; echo "${ID}") $(lsb_release -cs) nginx" | ${SUDO} tee /etc/apt/sources.list.d/nginx.list >/dev/null
       if ! ${SUDO} apt-get update; then
         error "Nginx 官方源刷新失败。请检查网络连接、软件源配置或稍后重试。"
         return 1
@@ -504,13 +533,16 @@ install_nginx_official() {
       fi
 
       note "配置 Nginx 官方 stable 源..."
-      cat <<'REPO' | ${SUDO} tee /etc/yum.repos.d/nginx.repo >/dev/null
+      local yum_mirror
+      yum_mirror="$(probe_nginx_mirror "/packages/centos" || echo "https://nginx.org")"
+      note "使用镜像源: ${yum_mirror}"
+      cat <<REPO | ${SUDO} tee /etc/yum.repos.d/nginx.repo >/dev/null
 [nginx-stable]
 name=nginx stable repo
-baseurl=https://nginx.org/packages/centos/$releasever/$basearch/
+baseurl=${yum_mirror}/packages/centos/\$releasever/\$basearch/
 gpgcheck=1
 enabled=1
-gpgkey=https://nginx.org/keys/nginx_signing.key
+gpgkey=${yum_mirror}/keys/nginx_signing.key
 module_hotfixes=true
 REPO
       ${SUDO} "$pkg" makecache -y || true
@@ -588,9 +620,9 @@ upgrade_nginx_smart() {
 
   # 仅在检测到 nginx 官方源时，才按官网版本做对比，避免 Debian/Ubuntu 默认源误判
   local using_official_repo="0"
-  if grep -rqsF 'nginx.org' /etc/apt/sources.list /etc/apt/sources.list.d/ 2>/dev/null; then
+  if grep -rqsF 'nginx.org\|mirrors\.\|/nginx/packages' /etc/apt/sources.list /etc/apt/sources.list.d/ 2>/dev/null; then
     using_official_repo="1"
-  elif [[ -f /etc/yum.repos.d/nginx.repo ]] || grep -rqsF 'nginx.org' /etc/yum.repos.d/ 2>/dev/null; then
+  elif [[ -f /etc/yum.repos.d/nginx.repo ]] || grep -rqsF 'nginx.org\|mirrors\.' /etc/yum.repos.d/ 2>/dev/null; then
     using_official_repo="1"
   fi
 
@@ -604,9 +636,12 @@ upgrade_nginx_smart() {
   if [[ "$using_official_repo" == "1" ]]; then
     if [[ -z "$latest_ver" ]]; then
       # Try a quick curl probe to classify failure (best-effort)
-      local probe_rc=0
-      curl -fsSL --connect-timeout 4 --max-time 8 -A 'Nginx-X version-check' https://nginx.org/en/download.html >/dev/null 2>&1 || probe_rc=$?
-      warn "无法获取官方最新版本（nginx.org 访问失败或解析失败：$(curl_error_hint "$probe_rc")），将改为直接通过包管理器检查并尝试升级。"
+      local probe_rc=0 probe_mirror
+      for probe_mirror in "${NGINX_MIRRORS[@]}"; do
+        curl -fsSL --connect-timeout 4 --max-time 8 -A 'Nginx-X version-check' "${probe_mirror}/en/download.html" >/dev/null 2>&1 || probe_rc=$?
+        if [[ "$probe_rc" -eq 0 ]]; then break; fi
+      done
+      warn "无法获取官方最新版本（所有镜像源访问失败，最后错误：$(curl_error_hint "$probe_rc")），将改为直接通过包管理器检查并尝试升级。"
       using_official_repo="0"
     else
       note "官方最新：${latest_ver}"
