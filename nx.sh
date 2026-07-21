@@ -15,7 +15,7 @@ NC='\033[0m'
 
 # ---------- 全局变量 ----------
 APP_NAME="Nginx-X"
-APP_VERSION="2.0.0 (2026-07-02)"
+APP_VERSION="2.1.0 (2026-07-21)"
 # Alpine 的 nginx 把 server 配置放在 http.d，其他系统用 conf.d
 if [[ -f /etc/nginx/http.d ]] || [[ -d /etc/nginx/http.d ]]; then
   CONF_DIR="/etc/nginx/http.d"
@@ -4212,6 +4212,92 @@ cert_menu() {
   done
 }
 
+# ---------- 功能5.5：系统信息 ----------
+show_system_info() {
+  clear
+  echo "================================================"
+  echo "              系统信息 - ${APP_NAME}"
+  echo "================================================"
+  echo ""
+
+  echo "--- 操作系统信息 ---"
+  if [[ -f /etc/os-release ]]; then
+    . /etc/os-release 2>/dev/null
+    echo "  发行版   : ${PRETTY_NAME:-$NAME $VERSION}"
+  fi
+  echo "  内核     : $(uname -r)"
+  echo "  架构     : $(uname -m)"
+  echo "  运行时间 : $(uptime -p 2>/dev/null || uptime | sed 's/.*up */up /')"
+  echo ""
+
+  echo "--- Nginx 信息 ---"
+  if check_cmd nginx; then
+    echo "  版本     : $(nginx -v 2>&1 | sed 's/nginx version: nginx\///')"
+    if check_cmd systemctl; then
+      echo "  状态     : $(systemctl is-active nginx 2>/dev/null || echo '未知')"
+    elif check_cmd rc-service; then
+      echo "  状态     : $(rc-service nginx status 2>/dev/null | head -1 || echo '未知')"
+    fi
+    local conf_count=0
+    if [[ -d "$CONF_DIR" ]]; then
+      conf_count=$(find "$CONF_DIR" -maxdepth 1 \( -name '*.conf' ! -name '*.conf.bak' ! -name 'acme-challenge-*.conf' ! -name 'nginx_status.conf' ! -name 'default.conf' \) 2>/dev/null | wc -l)
+    fi
+    echo "  已启用配置 : ${conf_count} 个 (目录: ${CONF_DIR})"
+  else
+    echo "  状态     : 未安装"
+  fi
+  echo ""
+
+  echo "--- acme.sh 信息 ---"
+  load_email
+  if [[ -x "$HOME/.acme.sh/acme.sh" ]]; then
+    echo "  acme.sh   : 已安装 ($($HOME/.acme.sh/acme.sh --version 2>/dev/null | head -1 || echo '版本未知'))"
+    if [[ -n "${ACME_EMAIL:-}" ]]; then
+      echo "  邮箱     : ${ACME_EMAIL}"
+    else
+      echo "  邮箱     : 未设置"
+    fi
+    local cert_count=0
+    cert_count=$("$HOME/.acme.sh/acme.sh" --list 2>/dev/null | awk 'NR>1 && NF>0 {c++} END {print c+0}')
+    echo "  证书数   : ${cert_count}"
+    if has_acme_cron_task; then
+      echo "  自动续期 : 已启用"
+    else
+      echo "  自动续期 : 未启用"
+    fi
+  else
+    echo "  acme.sh   : 未安装"
+    if [[ -n "${ACME_EMAIL:-}" ]]; then
+      echo "  邮箱     : ${ACME_EMAIL} (已保存，待安装 acme.sh 后生效)"
+    else
+      echo "  邮箱     : 未设置"
+    fi
+  fi
+  echo ""
+
+  echo "--- DNS API 信息 ---"
+  load_dns_conf
+  if [[ -n "${DNS_PROVIDER:-}" ]]; then
+    echo "  服务商   : ${DNS_PROVIDER}"
+    if [[ -n "${DNS_KEY1:-}" ]]; then
+      local masked_key="${DNS_KEY1:0:4}****${DNS_KEY1: -4}"
+      echo "  Key1     : ${masked_key}"
+    fi
+    if [[ -n "${DNS_KEY2:-}" ]]; then
+      local masked_key2="${DNS_KEY2:0:4}****${DNS_KEY2: -4}"
+      echo "  Key2     : ${masked_key2}"
+    fi
+  else
+    echo "  状态     : 未配置"
+  fi
+
+  echo ""
+  echo "--- ${APP_NAME} 信息 ---"
+  echo "  版本     : ${APP_VERSION}"
+  echo "  安装路径 : ${SCRIPT_DIR}"
+  echo "================================================"
+}
+
 # ---------- 功能6：流量统计与状态 ----------
 ensure_status_endpoint() {
   local status_conf="${CONF_DIR}/nginx_status.conf"
@@ -4696,8 +4782,9 @@ main_menu() {
   echo "2) 配置管理"
   echo "3) 证书管理"
   echo "4) 实时信息"
-  echo "5) 卸载"
-  echo "6) 更新脚本"
+  echo "5) 系统信息"
+  echo "6) 卸载"
+  echo "7) 更新脚本"
   echo "0) 退出"
   echo "========================================"
 }
@@ -4716,10 +4803,11 @@ main() {
       2) config_entry_menu ;;
       3) cert_menu ;;
       4) realtime_info_menu ;;
-      5) uninstall_menu ;;
-      6) run_menu_action update_script; pause ;;
+      5) run_menu_action show_system_info; pause ;;
+      6) uninstall_menu ;;
+      7) run_menu_action update_script; pause ;;
       0) info "已退出 ${APP_NAME}。"; exit 0 ;;
-      *) warn "无效输入，请输入主菜单中的编号（0-6）。"; pause ;;
+      *) warn "无效输入，请输入主菜单中的编号（0-7）。"; pause ;;
     esac
   done
 }
