@@ -2658,7 +2658,7 @@ dns_setup_menu() {
     if [[ -L /etc/resolv.conf ]]; then
       ${SUDO} rm -f /etc/resolv.conf
     fi
-    ${SUDO} cp -a "$tmp_resolv" /etc/resolv.conf
+    ${SUDO} install -m 0644 "$tmp_resolv" /etc/resolv.conf
     rm -f "$tmp_resolv"
 
     info "DNS 已更新为：${ns1}${ns2:+ + ${ns2}}"
