@@ -348,7 +348,7 @@ probe_nginx_mirror() {
   local path="${1:-/keys/nginx_signing.key}"
   local mirror
   for mirror in "${NGINX_MIRRORS[@]}"; do
-    note "尝试连接镜像: ${mirror}"
+    note "尝试连接镜像: ${mirror}" >&2
     if curl -fsSL --connect-timeout 3 --max-time 6 -A 'Nginx-X mirror-probe' -o /dev/null "${mirror}${path}" 2>/dev/null; then
       echo "$mirror"
       return 0
@@ -484,6 +484,7 @@ install_nginx_official() {
 
   case "$pkg" in
     apt)
+      ${SUDO} rm -f /etc/apt/sources.list.d/nginx.list 2>/dev/null || true
       if ! ${SUDO} apt-get update; then
         error "依赖索引刷新失败。请检查网络连接、APT 源状态或稍后重试。"
         return 1
@@ -496,6 +497,7 @@ install_nginx_official() {
       note "配置 Nginx 官方 stable 源..."
       local gpg_mirror repo_mirror gpg_ok
       gpg_ok=0
+      ${SUDO} rm -f /usr/share/keyrings/nginx-archive-keyring.gpg 2>/dev/null || true
       for gpg_mirror in "${NGINX_MIRRORS[@]}"; do
         note "尝试从 ${gpg_mirror} 下载签名密钥..."
         if curl -fsSL --connect-timeout 6 --max-time 12 "${gpg_mirror}/keys/nginx_signing.key" | ${SUDO} gpg --dearmor -o /usr/share/keyrings/nginx-archive-keyring.gpg 2>/dev/null; then
