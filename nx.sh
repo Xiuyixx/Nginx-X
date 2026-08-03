@@ -4742,7 +4742,7 @@ update_script() {
   if [[ -n "$work_dir" ]]; then
     # 校对 remote，防止已仓库指向旧 fork
     local cur_remote=""
-    cur_remote="$(${SUDO} git -C "$work_dir" remote get-url origin 2>/dev/null || echo '')"
+    cur_remote="$(cd "$work_dir" && ${SUDO} git config --get remote.origin.url 2>/dev/null || echo '')"
     if [[ -n "$cur_remote" && "$cur_remote" != "$REPO_URL" ]]; then
       warn "当前仓库 remote 与内置 REPO_URL 不一致："
       warn "  本地: $cur_remote"
@@ -4752,7 +4752,7 @@ update_script() {
         return 0
       fi
     fi
-    if ! ${SUDO} git -C "$work_dir" pull --ff-only origin "${REPO_BRANCH}"; then
+    if ! (cd "$work_dir" && ${SUDO} git pull --ff-only origin "${REPO_BRANCH}"); then
       error "拉取最新代码失败，请检查网络或手动更新。"
       return 1
     fi
