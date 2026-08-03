@@ -94,7 +94,7 @@ bootstrap_install() {
 
   if [[ -d "$INSTALL_DIR/.git" ]]; then
     echo "[INFO] 检测到已安装目录，正在更新..."
-    if ! ${SUDO} git -C "$INSTALL_DIR" pull origin "$REPO_BRANCH" --ff-only; then
+    if ! (cd "$INSTALL_DIR" && ${SUDO} git pull origin "$REPO_BRANCH" --ff-only); then
       echo "[ERROR] 拉取最新代码失败。"
       exit 1
     fi

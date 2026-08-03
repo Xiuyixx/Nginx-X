@@ -15,7 +15,7 @@ NC='\033[0m'
 
 # ---------- 全局变量 ----------
 APP_NAME="Nginx-X"
-APP_VERSION="2.0.0 (2026-07-02)"
+APP_VERSION="2.1.0 (2026-07-21)"
 # Alpine 的 nginx 把 server 配置放在 http.d，其他系统用 conf.d
 if [[ -f /etc/nginx/http.d ]] || [[ -d /etc/nginx/http.d ]]; then
   CONF_DIR="/etc/nginx/http.d"
@@ -30,6 +30,15 @@ DNS_CONF="${STATE_DIR}/dns.conf"
 REPO_URL="https://github.com/Xiuyixx/Nginx-X.git"
 REPO_BRANCH="main"
 REPO_INSTALL_DIR="/opt/Nginx-X"
+
+NGINX_MIRRORS=(
+  "https://nginx.org"
+  "https://mirrors.tuna.tsinghua.edu.cn/nginx"
+  "https://mirrors.ustc.edu.cn/nginx"
+  "https://mirrors.aliyun.com/nginx"
+  "https://mirrors.cloud.tencent.com/nginx"
+  "https://mirrors.huaweicloud.com/nginx"
+)
 
 SUDO=""
 if [[ ${EUID:-$(id -u)} -ne 0 ]]; then
@@ -335,17 +344,24 @@ nginx_local_version() {
   nginx -v 2>&1 | sed -E 's#^nginx version: nginx/##' || echo ""
 }
 
-nginx_latest_version_online() {
-  # 使用 Nginx 官网下载页中的 stable 区块获取最新稳定版版本号
-  # 说明：部分环境可能无法访问 nginx.org（网络/IPv6/DNS/证书链等）。
-  # 该函数失败时应返回空字符串，由上层决定回退策略。
-  local latest page
+probe_nginx_mirror() {
+  local path="${1:-/keys/nginx_signing.key}"
+  local mirror
+  for mirror in "${NGINX_MIRRORS[@]}"; do
+    note "尝试连接镜像: ${mirror}" >&2
+    if curl -fsSL --connect-timeout 3 --max-time 6 -A 'Nginx-X mirror-probe' -o /dev/null "${mirror}${path}" 2>/dev/null; then
+      echo "$mirror"
+      return 0
+    fi
+  done
+  return 1
+}
 
+nginx_latest_version_online() {
+  local latest page
   page="$(curl -fsSL --connect-timeout 4 --max-time 8 \
     -A 'Nginx-X version-check' \
     https://nginx.org/en/download.html 2>/dev/null || true)"
-
-  # fallback: try http if https fails (some environments have TLS issues)
   if [[ -z "$page" ]]; then
     page="$(curl -fsSL --connect-timeout 4 --max-time 8 \
       -A 'Nginx-X version-check' \
@@ -468,6 +484,7 @@ install_nginx_official() {
 
   case "$pkg" in
     apt)
+      ${SUDO} rm -f /etc/apt/sources.list.d/nginx.list 2>/dev/null || true
       if ! ${SUDO} apt-get update; then
         error "依赖索引刷新失败。请检查网络连接、APT 源状态或稍后重试。"
         return 1
@@ -478,12 +495,25 @@ install_nginx_official() {
       fi
 
       note "配置 Nginx 官方 stable 源..."
-      if ! curl -fsSL https://nginx.org/keys/nginx_signing.key | ${SUDO} gpg --dearmor -o /usr/share/keyrings/nginx-archive-keyring.gpg; then
+      local gpg_mirror repo_mirror gpg_ok
+      gpg_ok=0
+      ${SUDO} rm -f /usr/share/keyrings/nginx-archive-keyring.gpg 2>/dev/null || true
+      for gpg_mirror in "${NGINX_MIRRORS[@]}"; do
+        note "尝试从 ${gpg_mirror} 下载签名密钥..."
+        if curl -fsSL --connect-timeout 6 --max-time 12 "${gpg_mirror}/keys/nginx_signing.key" | ${SUDO} gpg --dearmor -o /usr/share/keyrings/nginx-archive-keyring.gpg 2>/dev/null; then
+          gpg_ok=1
+          break
+        fi
+      done
+      if [[ "$gpg_ok" != "1" ]]; then
         error "下载或导入 Nginx 官方签名密钥失败。请检查网络连接后重试。"
         return 1
       fi
+
+      repo_mirror="$(probe_nginx_mirror "/packages/$(. /etc/os-release; echo "${ID}")" || echo "https://nginx.org")"
+      note "使用镜像源: ${repo_mirror}"
       # shellcheck disable=SC1091
-      echo "deb [signed-by=/usr/share/keyrings/nginx-archive-keyring.gpg] https://nginx.org/packages/$(. /etc/os-release; echo "${ID}") $(lsb_release -cs) nginx" | ${SUDO} tee /etc/apt/sources.list.d/nginx.list >/dev/null
+      echo "deb [signed-by=/usr/share/keyrings/nginx-archive-keyring.gpg] ${repo_mirror}/packages/$(. /etc/os-release; echo "${ID}") $(lsb_release -cs) nginx" | ${SUDO} tee /etc/apt/sources.list.d/nginx.list >/dev/null
       if ! ${SUDO} apt-get update; then
         error "Nginx 官方源刷新失败。请检查网络连接、软件源配置或稍后重试。"
         return 1
@@ -504,13 +534,16 @@ install_nginx_official() {
       fi
 
       note "配置 Nginx 官方 stable 源..."
-      cat <<'REPO' | ${SUDO} tee /etc/yum.repos.d/nginx.repo >/dev/null
+      local yum_mirror
+      yum_mirror="$(probe_nginx_mirror "/packages/centos" || echo "https://nginx.org")"
+      note "使用镜像源: ${yum_mirror}"
+      cat <<REPO | ${SUDO} tee /etc/yum.repos.d/nginx.repo >/dev/null
 [nginx-stable]
 name=nginx stable repo
-baseurl=https://nginx.org/packages/centos/$releasever/$basearch/
+baseurl=${yum_mirror}/packages/centos/\$releasever/\$basearch/
 gpgcheck=1
 enabled=1
-gpgkey=https://nginx.org/keys/nginx_signing.key
+gpgkey=${yum_mirror}/keys/nginx_signing.key
 module_hotfixes=true
 REPO
       ${SUDO} "$pkg" makecache -y || true
@@ -588,9 +621,9 @@ upgrade_nginx_smart() {
 
   # 仅在检测到 nginx 官方源时，才按官网版本做对比，避免 Debian/Ubuntu 默认源误判
   local using_official_repo="0"
-  if grep -rqsF 'nginx.org' /etc/apt/sources.list /etc/apt/sources.list.d/ 2>/dev/null; then
+  if grep -rqsF 'nginx.org\|mirrors\.\|/nginx/packages' /etc/apt/sources.list /etc/apt/sources.list.d/ 2>/dev/null; then
     using_official_repo="1"
-  elif [[ -f /etc/yum.repos.d/nginx.repo ]] || grep -rqsF 'nginx.org' /etc/yum.repos.d/ 2>/dev/null; then
+  elif [[ -f /etc/yum.repos.d/nginx.repo ]] || grep -rqsF 'nginx.org\|mirrors\.' /etc/yum.repos.d/ 2>/dev/null; then
     using_official_repo="1"
   fi
 
@@ -606,7 +639,10 @@ upgrade_nginx_smart() {
       # Try a quick curl probe to classify failure (best-effort)
       local probe_rc=0
       curl -fsSL --connect-timeout 4 --max-time 8 -A 'Nginx-X version-check' https://nginx.org/en/download.html >/dev/null 2>&1 || probe_rc=$?
-      warn "无法获取官方最新版本（nginx.org 访问失败或解析失败：$(curl_error_hint "$probe_rc")），将改为直接通过包管理器检查并尝试升级。"
+      if [[ "$probe_rc" -ne 0 ]]; then
+        curl -fsSL --connect-timeout 4 --max-time 8 -A 'Nginx-X version-check' http://nginx.org/en/download.html >/dev/null 2>&1 || probe_rc=$?
+      fi
+      warn "无法获取官方最新版本（nginx.org 访问失败：$(curl_error_hint "$probe_rc")），将改为直接通过包管理器检查并尝试升级。"
       using_official_repo="0"
     else
       note "官方最新：${latest_ver}"
@@ -2624,7 +2660,7 @@ dns_setup_menu() {
     if [[ -L /etc/resolv.conf ]]; then
       ${SUDO} rm -f /etc/resolv.conf
     fi
-    ${SUDO} cp -a "$tmp_resolv" /etc/resolv.conf
+    ${SUDO} install -m 0644 "$tmp_resolv" /etc/resolv.conf
     rm -f "$tmp_resolv"
 
     info "DNS 已更新为：${ns1}${ns2:+ + ${ns2}}"
@@ -2728,6 +2764,7 @@ get_dns_issue_args() {
 
 setup_dns_api() {
   local choice provider key1 key2
+  local prompt_test="${1:-1}"
   echo "选择 DNS 服务商："
   echo "1)  Cloudflare      (CF_Token)"
   echo "2)  DNSPod          (DP_Id + DP_Key)"
@@ -2767,7 +2804,7 @@ setup_dns_api() {
   esac
 
   info "DNS API 配置完成（${provider}）。"
-  if confirm "是否现在测试申请证书？"; then
+  if [[ "$prompt_test" == "1" ]] && confirm "是否现在测试申请证书？"; then
     local test_domain
     read -rp "请输入测试域名: " test_domain
     if valid_domain "$test_domain"; then
@@ -2825,7 +2862,7 @@ select_cert_mode_interactive() {
     2)
       if ! has_dns_config; then
         >&2 warn "DNS API Token not configured, please set up first."
-        if ! setup_dns_api >&2; then
+        if ! setup_dns_api 0 >&2; then
           >&2 error "DNS API setup failed, fallback to HTTP-01."
           echo "http"
           return 0
@@ -4185,6 +4222,93 @@ cert_menu() {
   done
 }
 
+# ---------- 功能5.5：系统信息 ----------
+show_system_info() {
+  clear
+  echo "================================================"
+  echo "              系统信息 - ${APP_NAME}"
+  echo "================================================"
+  echo ""
+
+  echo "--- 操作系统信息 ---"
+  if [[ -f /etc/os-release ]]; then
+    . /etc/os-release 2>/dev/null
+    echo "  发行版   : ${PRETTY_NAME:-$NAME $VERSION}"
+  fi
+  echo "  内核     : $(uname -r)"
+  echo "  架构     : $(uname -m)"
+  echo "  运行时间 : $(uptime -p 2>/dev/null || uptime | sed 's/.*up */up /')"
+  echo "  系统 DNS  : $(awk '/^nameserver/ {printf "%s ", $2}' /etc/resolv.conf 2>/dev/null | sed 's/ $//')"
+  echo ""
+
+  echo "--- Nginx 信息 ---"
+  if check_cmd nginx; then
+    echo "  版本     : $(nginx -v 2>&1 | sed 's/nginx version: nginx\///')"
+    if check_cmd systemctl; then
+      echo "  状态     : $(systemctl is-active nginx 2>/dev/null || echo '未知')"
+    elif check_cmd rc-service; then
+      echo "  状态     : $(rc-service nginx status 2>/dev/null | head -1 || echo '未知')"
+    fi
+    local conf_count=0
+    if [[ -d "$CONF_DIR" ]]; then
+      conf_count=$(find "$CONF_DIR" -maxdepth 1 \( -name '*.conf' ! -name '*.conf.bak' ! -name 'acme-challenge-*.conf' ! -name 'nginx_status.conf' ! -name 'default.conf' \) 2>/dev/null | wc -l)
+    fi
+    echo "  已启用配置 : ${conf_count} 个 (目录: ${CONF_DIR})"
+  else
+    echo "  状态     : 未安装"
+  fi
+  echo ""
+
+  echo "--- acme.sh 信息 ---"
+  load_email
+  if [[ -x "$HOME/.acme.sh/acme.sh" ]]; then
+    echo "  acme.sh   : 已安装 ($("$HOME"/.acme.sh/acme.sh --version 2>/dev/null | head -1 || echo '版本未知'))"
+    if [[ -n "${ACME_EMAIL:-}" ]]; then
+      echo "  邮箱     : ${ACME_EMAIL}"
+    else
+      echo "  邮箱     : 未设置"
+    fi
+    local cert_count=0
+    cert_count=$("$HOME/.acme.sh/acme.sh" --list 2>/dev/null | awk 'NR>1 && NF>0 {c++} END {print c+0}')
+    echo "  证书数   : ${cert_count}"
+    if has_acme_cron_task; then
+      echo "  自动续期 : 已启用"
+    else
+      echo "  自动续期 : 未启用"
+    fi
+  else
+    echo "  acme.sh   : 未安装"
+    if [[ -n "${ACME_EMAIL:-}" ]]; then
+      echo "  邮箱     : ${ACME_EMAIL} (已保存，待安装 acme.sh 后生效)"
+    else
+      echo "  邮箱     : 未设置"
+    fi
+  fi
+  echo ""
+
+  echo "--- DNS API 信息 ---"
+  load_dns_conf
+  if [[ -n "${DNS_PROVIDER:-}" ]]; then
+    echo "  服务商   : ${DNS_PROVIDER}"
+    if [[ -n "${DNS_KEY1:-}" ]]; then
+      local masked_key="${DNS_KEY1:0:4}****${DNS_KEY1: -4}"
+      echo "  Key1     : ${masked_key}"
+    fi
+    if [[ -n "${DNS_KEY2:-}" ]]; then
+      local masked_key2="${DNS_KEY2:0:4}****${DNS_KEY2: -4}"
+      echo "  Key2     : ${masked_key2}"
+    fi
+  else
+    echo "  状态     : 未配置"
+  fi
+
+  echo ""
+  echo "--- ${APP_NAME} 信息 ---"
+  echo "  版本     : ${APP_VERSION}"
+  echo "  安装路径 : ${SCRIPT_DIR}"
+  echo "================================================"
+}
+
 # ---------- 功能6：流量统计与状态 ----------
 ensure_status_endpoint() {
   local status_conf="${CONF_DIR}/nginx_status.conf"
@@ -4620,7 +4744,7 @@ update_script() {
   if [[ -n "$work_dir" ]]; then
     # 校对 remote，防止已仓库指向旧 fork
     local cur_remote=""
-    cur_remote="$(${SUDO} git -C "$work_dir" remote get-url origin 2>/dev/null || echo '')"
+    cur_remote="$(cd "$work_dir" && ${SUDO} git config --get remote.origin.url 2>/dev/null || echo '')"
     if [[ -n "$cur_remote" && "$cur_remote" != "$REPO_URL" ]]; then
       warn "当前仓库 remote 与内置 REPO_URL 不一致："
       warn "  本地: $cur_remote"
@@ -4630,7 +4754,7 @@ update_script() {
         return 0
       fi
     fi
-    if ! ${SUDO} git -C "$work_dir" pull --ff-only origin "${REPO_BRANCH}"; then
+    if ! (cd "$work_dir" && ${SUDO} git pull --ff-only origin "${REPO_BRANCH}"); then
       error "拉取最新代码失败，请检查网络或手动更新。"
       return 1
     fi
@@ -4669,8 +4793,9 @@ main_menu() {
   echo "2) 配置管理"
   echo "3) 证书管理"
   echo "4) 实时信息"
-  echo "5) 卸载"
-  echo "6) 更新脚本"
+  echo "5) 系统信息"
+  echo "6) 卸载"
+  echo "7) 更新脚本"
   echo "0) 退出"
   echo "========================================"
 }
@@ -4689,10 +4814,11 @@ main() {
       2) config_entry_menu ;;
       3) cert_menu ;;
       4) realtime_info_menu ;;
-      5) uninstall_menu ;;
-      6) run_menu_action update_script; pause ;;
+      5) run_menu_action show_system_info; pause ;;
+      6) uninstall_menu ;;
+      7) run_menu_action update_script; pause ;;
       0) info "已退出 ${APP_NAME}。"; exit 0 ;;
-      *) warn "无效输入，请输入主菜单中的编号（0-6）。"; pause ;;
+      *) warn "无效输入，请输入主菜单中的编号（0-7）。"; pause ;;
     esac
   done
 }
