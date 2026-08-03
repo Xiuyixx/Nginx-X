@@ -2762,6 +2762,7 @@ get_dns_issue_args() {
 
 setup_dns_api() {
   local choice provider key1 key2
+  local prompt_test="${1:-1}"
   echo "选择 DNS 服务商："
   echo "1)  Cloudflare      (CF_Token)"
   echo "2)  DNSPod          (DP_Id + DP_Key)"
@@ -2801,7 +2802,7 @@ setup_dns_api() {
   esac
 
   info "DNS API 配置完成（${provider}）。"
-  if confirm "是否现在测试申请证书？"; then
+  if [[ "$prompt_test" == "1" ]] && confirm "是否现在测试申请证书？"; then
     local test_domain
     read -rp "请输入测试域名: " test_domain
     if valid_domain "$test_domain"; then
@@ -2859,7 +2860,7 @@ select_cert_mode_interactive() {
     2)
       if ! has_dns_config; then
         >&2 warn "DNS API Token not configured, please set up first."
-        if ! setup_dns_api >&2; then
+        if ! setup_dns_api 0 >&2; then
           >&2 error "DNS API setup failed, fallback to HTTP-01."
           echo "http"
           return 0
