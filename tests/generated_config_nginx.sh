@@ -56,5 +56,9 @@ build_external_proxy_conf \
   "$CONF_DIR/external.conf" \
   "1"
 
-nginx -t -p "$TMPDIR_ROOT/" -c "$NGINX_MAIN_CONF"
+nginx_cmd=(nginx)
+if [[ ${EUID:-0} -ne 0 ]] && command -v sudo >/dev/null 2>&1; then
+  nginx_cmd=(sudo nginx)
+fi
+"${nginx_cmd[@]}" -t -p "$TMPDIR_ROOT/" -c "$NGINX_MAIN_CONF"
 echo "generated configs passed nginx -t"
