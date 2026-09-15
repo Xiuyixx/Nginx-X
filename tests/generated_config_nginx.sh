@@ -29,6 +29,8 @@ openssl req -x509 -newkey rsa:2048 -nodes -days 1 \
   -out "$SSL_DIR/external.example.com/fullchain.pem" >/dev/null 2>&1
 
 cat > "$NGINX_MAIN_CONF" <<EOF
+pid ${TMPDIR_ROOT}/nginx.pid;
+error_log stderr;
 events {}
 http {
     map \$http_upgrade \$connection_upgrade {
