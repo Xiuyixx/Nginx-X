@@ -33,6 +33,7 @@ pid ${TMPDIR_ROOT}/nginx.pid;
 error_log stderr;
 events {}
 http {
+    access_log off;
     map \$http_upgrade \$connection_upgrade {
         default upgrade;
         '' close;
