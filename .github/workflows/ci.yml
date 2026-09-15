@@ -4,6 +4,9 @@ on:
   push:
   pull_request:
 
+permissions:
+  contents: read
+
 jobs:
   bash-check:
     runs-on: ubuntu-latest
@@ -11,19 +14,21 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Install shellcheck
-        run: sudo apt-get update && sudo apt-get install -y shellcheck
+      - name: Install test dependencies
+        run: sudo apt-get update && sudo apt-get install -y nginx shellcheck
 
       - name: Bash syntax check
         run: |
           bash -n nx.sh
           bash -n install.sh
-          bash -n tests/https_config_regression.sh
+          bash -n tests/*.sh
 
       - name: ShellCheck
         run: |
-          shellcheck -x nx.sh install.sh tests/https_config_regression.sh
+          shellcheck -x -S style nx.sh install.sh tests/*.sh
 
       - name: Run regression tests
         run: |
-          bash tests/https_config_regression.sh
+          for test_file in tests/*.sh; do
+            bash "$test_file"
+          done

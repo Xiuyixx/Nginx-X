@@ -6,6 +6,15 @@
 
 ### Fixed
 - **LilyEmby 方案非标端口修复**：当反代监听端口非 443（如 443 被占用改用 8443）时，`sub_filter` / `proxy_redirect` 的重写目标现在会带上端口后缀（`https://域名:端口/sN`）。此前重写目标丢失端口，指向默认 443，客户端在非标端口访问时拿到不可达地址，导致播放大流量绕过反代直连源推流域名（issue #6）。标准 443 端口行为不变。
+- 配置写入统一使用 `0644` 权限，避免 `mktemp` 的 `0600` 权限和调用用户属主被复制到 Nginx 配置或 `/etc/resolv.conf`。
+- WebSocket map、ACME location 和普通配置在校验或重载失败时均会恢复原文件。
+- HTTPS 启用/停用会保留内部反代的 `backend_port` 元数据，避免后续修改时回退到默认端口。
+- DNS API 密钥和 ACME 邮箱使用 shell 安全转义持久化，避免特殊字符在加载时被解释执行。
+- 移除 `grep -P`、`awk ENDFILE/nextfile` 等 BusyBox 不兼容用法，并为端口检测增加 `netstat` 回退。
+- 修正 ACME 续期任务残留提示和实时状态 QPS 的 5 秒采样换算。
+
+### Security
+- 上游 URL 拒绝 `$`，避免 heredoc 生成配置时发生 shell 变量展开。
 
 ---
 

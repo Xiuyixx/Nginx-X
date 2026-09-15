@@ -73,7 +73,6 @@ install_local() {
     exit 1
   fi
 
-  chmod +x "$source_script"
   ${SUDO} mkdir -p "$(dirname "$TARGET_BIN")"
   ${SUDO} install -m 0755 "$source_script" "$TARGET_BIN"
 

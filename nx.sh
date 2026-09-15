@@ -15,7 +15,7 @@ NC='\033[0m'
 
 # ---------- 全局变量 ----------
 APP_NAME="Nginx-X"
-APP_VERSION="2.0.0 (2026-07-02)"
+APP_VERSION="2.0.0 (2026-09-15)"
 # Alpine 的 nginx 把 server 配置放在 http.d，其他系统用 conf.d
 if [[ -f /etc/nginx/http.d ]] || [[ -d /etc/nginx/http.d ]]; then
   CONF_DIR="/etc/nginx/http.d"
@@ -23,6 +23,7 @@ else
   CONF_DIR="/etc/nginx/conf.d"
 fi
 SSL_DIR="/etc/nginx/ssl"
+NGINX_MAIN_CONF="${NGINX_MAIN_CONF:-/etc/nginx/nginx.conf}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 STATE_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/nginxx"
 EMAIL_CONF="${STATE_DIR}/email.conf"
@@ -63,7 +64,13 @@ run_menu_action() {
   # After uninstalling packages (e.g. nginx), the cached path can point to a deleted binary.
   # Refresh hash table before each menu action so check_cmd / execution are accurate.
   hash -r 2>/dev/null || true
-  "$@" || true
+  if ! "$@"; then
+    warn "操作未完成，请查看上方错误信息。"
+  fi
+}
+
+install_managed_file() {
+  ${SUDO} install -m 0644 "$1" "$2"
 }
 
 # ---------- 基础能力 ----------
@@ -125,26 +132,44 @@ reload_nginx_safe() {
 
   if check_cmd systemctl; then
     if ${SUDO} systemctl is-active --quiet nginx; then
-      ${SUDO} systemctl reload nginx
+      if ! ${SUDO} systemctl reload nginx; then
+        error "Nginx 重载失败。"
+        return 1
+      fi
       info "Nginx 已重载。"
     else
-      ${SUDO} systemctl start nginx
+      if ! ${SUDO} systemctl start nginx; then
+        error "Nginx 启动失败。"
+        return 1
+      fi
       info "检测到 Nginx 未运行，已自动启动。"
     fi
   elif check_cmd rc-service; then
     if ${SUDO} rc-service nginx status 2>/dev/null; then
-      ${SUDO} rc-service nginx reload 2>/dev/null || ${SUDO} rc-service nginx restart
+      if ! ${SUDO} rc-service nginx reload 2>/dev/null && ! ${SUDO} rc-service nginx restart; then
+        error "Nginx 重载失败。"
+        return 1
+      fi
       info "Nginx 已重载。"
     else
-      ${SUDO} rc-service nginx start
+      if ! ${SUDO} rc-service nginx start; then
+        error "Nginx 启动失败。"
+        return 1
+      fi
       info "检测到 Nginx 未运行，已自动启动。"
     fi
   else
     if ${SUDO} service nginx status >/dev/null 2>&1; then
-      ${SUDO} service nginx reload
+      if ! ${SUDO} service nginx reload; then
+        error "Nginx 重载失败。"
+        return 1
+      fi
       info "Nginx 已重载。"
     else
-      ${SUDO} service nginx start
+      if ! ${SUDO} service nginx start; then
+        error "Nginx 启动失败。"
+        return 1
+      fi
       info "检测到 Nginx 未运行，已自动启动。"
     fi
   fi
@@ -160,13 +185,13 @@ ensure_websocket_map() {
   local map_conf="${CONF_DIR}/00-websocket-map.conf"
 
   # Skip if nginx is not installed yet (no nginx.conf)
-  if [[ ! -f /etc/nginx/nginx.conf ]]; then
+  if [[ ! -f "$NGINX_MAIN_CONF" ]]; then
     return 0
   fi
 
   # Skip if nginx.conf already defines the map (e.g. Alpine default config)
   # shellcheck disable=SC2016  # $http_upgrade is literal nginx variable syntax, matched as-is
-  if grep -qF 'map $http_upgrade' /etc/nginx/nginx.conf 2>/dev/null; then
+  if grep -qF 'map $http_upgrade' "$NGINX_MAIN_CONF" 2>/dev/null; then
     return 0
   fi
 
@@ -181,13 +206,13 @@ ensure_websocket_map() {
     in_http && /include/ && /(conf\.d|http\.d)/ { found = 1; exit }
     in_http && /^\}/ { in_http = 0 }
     END { exit found ? 0 : 1 }
-  ' /etc/nginx/nginx.conf 2>/dev/null; then
+  ' "$NGINX_MAIN_CONF" 2>/dev/null; then
     need_inject=1
   fi
 
   if [[ "$need_inject" -eq 1 ]]; then
     # CONF_DIR is included at root level → inject map into nginx.conf http block
-    local tmp_nginx
+    local tmp_nginx backup_nginx
     tmp_nginx="$(mktemp /tmp/nginxx-map-XXXXXX)"
     trap 'rm -f "${tmp_nginx:-}"' RETURN
     awk '
@@ -203,10 +228,19 @@ ensure_websocket_map() {
         next
       }
       { print }
-    ' /etc/nginx/nginx.conf > "$tmp_nginx"
+    ' "$NGINX_MAIN_CONF" > "$tmp_nginx"
 
-    ${SUDO} cp -a /etc/nginx/nginx.conf /etc/nginx/nginx.conf.bak."$(date +%s)" 2>/dev/null || true
-    ${SUDO} cp -a "$tmp_nginx" /etc/nginx/nginx.conf
+    backup_nginx="${NGINX_MAIN_CONF}.bak.$(date +%s).$$"
+    ${SUDO} cp -a "$NGINX_MAIN_CONF" "$backup_nginx"
+    install_managed_file "$tmp_nginx" "$NGINX_MAIN_CONF"
+    if ! reload_nginx_safe; then
+      ${SUDO} cp -a "$backup_nginx" "$NGINX_MAIN_CONF"
+      ${SUDO} rm -f "$backup_nginx"
+      reload_nginx_safe >/dev/null 2>&1 || true
+      error "WebSocket map 写入后校验或重载失败，已恢复 nginx.conf。"
+      return 1
+    fi
+    ${SUDO} rm -f "$backup_nginx"
     rm -f "$tmp_nginx"
     info "已将 WebSocket map 注入 nginx.conf http 块。"
     return 0
@@ -214,7 +248,9 @@ ensure_websocket_map() {
 
   # Standard: CONF_DIR is inside http block, map file is safe
   if [[ ! -f "$map_conf" ]]; then
-    ${SUDO} tee "$map_conf" > /dev/null <<'EOF'
+    local tmp_map
+    tmp_map="$(mktemp /tmp/nginxx-map-conf-XXXXXX)"
+    cat > "$tmp_map" <<'EOF'
 # managed_by=Nginx-X
 # WebSocket upgrade map — included by all proxy configs via conf.d
 map $http_upgrade $connection_upgrade {
@@ -222,6 +258,11 @@ map $http_upgrade $connection_upgrade {
     ''      close;
 }
 EOF
+    if ! apply_conf_with_rollback "$tmp_map" "$map_conf"; then
+      rm -f "$tmp_map"
+      return 1
+    fi
+    rm -f "$tmp_map"
     info "已写入 WebSocket map：${map_conf}"
   fi
 }
@@ -780,12 +821,19 @@ valid_url() {
   [[ "$url" == *';'* ]] && return 1
   [[ "$url" == *"'"* ]] && return 1
   [[ "$url" == *'`'* ]] && return 1
+  [[ "$url" == *'$'* ]] && return 1
   return 0
 }
 
 is_port_used_os() {
   local p="$1"
-  ss -lnt "( sport = :${p} )" 2>/dev/null | awk 'NR>1{print}' | grep -q .
+  if check_cmd ss; then
+    ss -lnt 2>/dev/null | awk -v p=":${p}" 'NR>1 && $4 ~ p "$" {found=1} END {exit !found}'
+  elif check_cmd netstat; then
+    netstat -lnt 2>/dev/null | awk -v p=":${p}" 'NR>2 && $4 ~ p "$" {found=1} END {exit !found}'
+  else
+    return 1
+  fi
 }
 
 port_has_ssl_listener() {
@@ -805,6 +853,27 @@ conf_meta_get() {
   grep -E "^# ${key}=" "$conf_file" 2>/dev/null | head -n1 | sed "s/^# ${key}=//" || true
 }
 
+extract_proxy_pass() {
+  sed -nE 's/^[[:space:]]*proxy_pass[[:space:]]+([^;]+);.*/\1/p' "$1" 2>/dev/null | head -n1
+}
+
+url_explicit_port() {
+  printf '%s\n' "$1" | sed -nE 's#^https?://(\[[^]]+\]|[^/:]+):([0-9]+)(/.*)?$#\2#p'
+}
+
+list_confs_by_meta_domain() {
+  local domain="$1"
+  awk -v d="$domain" '
+    FNR == 1 {
+      if (NR > 1 && found) print previous_file
+      previous_file=FILENAME
+      found=0
+    }
+    $0 == "# domain=" d {found=1}
+    END {if (found) print FILENAME}
+  ' "${CONF_DIR}"/*.conf 2>/dev/null || true
+}
+
 mark_conf_manual_edited() {
   local conf_file="$1"
   local tmp
@@ -816,7 +885,7 @@ mark_conf_manual_edited() {
     echo "# edited=true"
     cat "$conf_file"
   } > "$tmp"
-  ${SUDO} cp -a "$tmp" "$conf_file"
+  install_managed_file "$tmp" "$conf_file"
   rm -f "$tmp"
 }
 
@@ -1426,7 +1495,7 @@ apply_conf_with_rollback() {
     ${SUDO} cp -a "$target_conf" "$backup"
   fi
 
-  ${SUDO} cp -a "$tmp_conf" "$target_conf"
+  install_managed_file "$tmp_conf" "$target_conf"
 
   if ! ensure_ssl_directives_present "$target_conf"; then
     if [[ -f "$backup" ]]; then
@@ -1439,9 +1508,20 @@ apply_conf_with_rollback() {
   fi
 
   if test_output="$(${SUDO} nginx -t 2>&1)"; then
-    reload_nginx_safe
-    [[ -f "$backup" ]] && ${SUDO} rm -f "$backup"
-    return 0
+    if reload_nginx_safe; then
+      [[ -f "$backup" ]] && ${SUDO} rm -f "$backup"
+      return 0
+    fi
+
+    if [[ -f "$backup" ]]; then
+      ${SUDO} cp -a "$backup" "$target_conf"
+      ${SUDO} rm -f "$backup"
+    else
+      ${SUDO} rm -f "$target_conf"
+    fi
+    reload_nginx_safe >/dev/null 2>&1 || true
+    error "Nginx 重载失败，已自动撤销本次修改。"
+    return 1
   fi
 
   # 回滚
@@ -1835,10 +1915,10 @@ modify_conf() {
   [[ -z "$current_listen" ]] && current_listen="80"
   # 元数据缺失时从实际 proxy_pass 提取后端端口
   if [[ -z "$current_backend" ]]; then
-    current_backend="$(grep -oP 'proxy_pass\s+https?://127\.0\.0\.1:\K[0-9]+' "$src" 2>/dev/null | head -1)"
+    current_backend="$(extract_proxy_pass "$src" | sed -nE 's#^https?://127\.0\.0\.1:([0-9]+)(/.*)?$#\1#p')"
   fi
   if [[ -z "$current_backend" ]]; then
-    current_backend="$(grep -oP 'proxy_pass\s+https?://localhost:\K[0-9]+' "$src" 2>/dev/null | head -1)"
+    current_backend="$(extract_proxy_pass "$src" | sed -nE 's#^https?://localhost:([0-9]+)(/.*)?$#\1#p')"
   fi
   [[ -z "$current_backend" ]] && current_backend="3000"
 
@@ -2260,8 +2340,8 @@ _scan_unmanaged_confs() {
   for _f in "${CONF_DIR}"/*.conf "${CONF_DIR}"/*.conf.*; do
     [[ -f "$_f" ]] || continue
     grep -q '^# managed_by=Nginx-X$' "$_f" 2>/dev/null || continue
-    _d="$(grep -oP '^# domain=\K.+' "$_f" 2>/dev/null | head -1)"
-    _p="$(grep -oP '^# listen_port=\K.+' "$_f" 2>/dev/null | head -1)"
+    _d="$(conf_meta_get "$_f" domain)"
+    _p="$(conf_meta_get "$_f" listen_port)"
     [[ -n "$_d" ]] && managed_index["${_d}|${_p:-80}"]=1
   done
 
@@ -2319,7 +2399,7 @@ _extract_conf_meta() {
   [[ -z "$listen_port" ]] && listen_port="80"
 
   # 提取 proxy_pass
-  backend_url="$(grep -oP 'proxy_pass\s+\K[^;]+' "$conf" | head -1)"
+  backend_url="$(extract_proxy_pass "$conf")"
 
   # 检测 HTTPS
   if grep -qE '^[[:space:]]*ssl_certificate[[:space:]]+' "$conf" 2>/dev/null; then
@@ -2389,7 +2469,7 @@ import_single_conf() {
   meta_header+="# imported=true"
   if [[ -n "$backend_url" ]]; then
     local backend_port
-    backend_port="$(echo "$backend_url" | grep -oP ':\K[0-9]+(?=/?$)' || true)"
+    backend_port="$(url_explicit_port "$backend_url")"
     if [[ -n "$backend_port" ]]; then
       meta_header+=$'\n'
       meta_header+="# backend_port=${backend_port}"
@@ -2420,7 +2500,7 @@ import_single_conf() {
     # 原文件就在 conf.d 里，直接原地加元数据头
     backup_conf="$(mktemp /tmp/nginxx-import-backup-XXXXXX)"
     ${SUDO} cp -a "$real_conf" "$backup_conf"
-    ${SUDO} cp -a "$tmp" "$real_conf"
+    install_managed_file "$tmp" "$real_conf"
     target_written="$real_conf"
     # 如果文件名不符合 domain-port.conf 规范，重命名
     if [[ "$(basename "$real_conf")" != "$target_name" && ! -f "$target_path" ]]; then
@@ -2439,7 +2519,7 @@ import_single_conf() {
     rm -f "$backup_conf"
   else
     # 来自 sites-available / sites-enabled，复制到 conf.d
-    ${SUDO} cp -a "$tmp" "$target_path"
+    install_managed_file "$tmp" "$target_path"
     target_written="$target_path"
 
     # 移除 sites-enabled 中对应的软链接（避免重复加载）
@@ -2624,7 +2704,7 @@ dns_setup_menu() {
     if [[ -L /etc/resolv.conf ]]; then
       ${SUDO} rm -f /etc/resolv.conf
     fi
-    ${SUDO} cp -a "$tmp_resolv" /etc/resolv.conf
+    install_managed_file "$tmp_resolv" /etc/resolv.conf
     rm -f "$tmp_resolv"
 
     info "DNS 已更新为：${ns1}${ns2:+ + ${ns2}}"
@@ -2677,11 +2757,11 @@ save_dns_conf() {
   # 密钥属于敏感信息，先设置只读权限再写入，避免明文密钥被同机其他用户读到。
   (
     umask 077
-    cat > "$DNS_CONF" <<EOF
-DNS_PROVIDER="${provider}"
-DNS_KEY1="${key1}"
-DNS_KEY2="${key2}"
-EOF
+    {
+      printf 'DNS_PROVIDER=%q\n' "$provider"
+      printf 'DNS_KEY1=%q\n' "$key1"
+      printf 'DNS_KEY2=%q\n' "$key2"
+    } > "$DNS_CONF"
   )
   chmod 600 "$DNS_CONF" 2>/dev/null || true
   info "DNS API 配置已保存到：${DNS_CONF}（权限 600）。"
@@ -2897,7 +2977,7 @@ _issue_cert_http() {
   local domain="$1"
   local challenge_conf
 
-  ensure_acme_location_for_domain_conf "$domain"
+  ensure_acme_location_for_domain_conf "$domain" || return 1
   challenge_conf="$(ensure_http_challenge_server "$domain")"
 
   if ! reload_nginx_safe; then
@@ -2990,9 +3070,10 @@ load_email() {
 save_email() {
   local email="$1"
   ensure_state_dir
-  cat > "$EMAIL_CONF" <<EOF
-ACME_EMAIL="${email}"
-EOF
+  ( umask 077
+    printf 'ACME_EMAIL=%q\n' "$email" > "$EMAIL_CONF"
+  )
+  chmod 600 "$EMAIL_CONF"
   info "邮箱已保存到：${EMAIL_CONF}"
 }
 
@@ -3085,7 +3166,7 @@ disable_acme_cron() {
   if ! has_acme_cron_task; then
     :
   else
-    warn "当前未检测到自动续期任务。"
+    warn "清理后仍检测到自动续期任务，请手动检查 crontab 和 periodic 目录。"
   fi
 }
 
@@ -3133,13 +3214,13 @@ ensure_acme_location_for_domain_conf() {
   trap 'for f in "${tmp_files[@]}"; do rm -f "$f" 2>/dev/null || true; done' RETURN
 
   # Primary: match our metadata line "# domain=<domain>"
-  mapfile -t matches < <(awk -v d="$domain" 'FNR==1{found=0} $0=="# domain=" d {found=1} ENDFILE{if(found) print FILENAME}' "${CONF_DIR}"/*.conf 2>/dev/null || true)
+  mapfile -t matches < <(list_confs_by_meta_domain "$domain")
 
   # Fallback: match server_name token containing the domain (best-effort, avoids missing metadata)
   if [[ ${#matches[@]} -eq 0 ]]; then
     mapfile -t matches < <(awk -v d="$domain" '
       BEGIN{in_server=0; hasDomain=0}
-      /server\s*\{/ {in_server=1; hasDomain=0}
+      /server[[:space:]]*\{/ {in_server=1; hasDomain=0}
       in_server && index($0, "server_name") {
         # Exact token match: server_name a b c;
         line=$0
@@ -3151,7 +3232,10 @@ ensure_acme_location_for_domain_conf() {
         }
       }
       in_server && /}/ {
-        if (hasDomain) {print FILENAME; nextfile}
+        if (hasDomain && !printed[FILENAME]) {
+          print FILENAME
+          printed[FILENAME]=1
+        }
         in_server=0
       }
     ' "${CONF_DIR}"/*.conf 2>/dev/null || true)
@@ -3182,7 +3266,10 @@ ensure_acme_location_for_domain_conf() {
       }
     ' "$conf_file" > "$tmp_file"
 
-    ${SUDO} cp -a "$tmp_file" "$conf_file"
+    if ! apply_conf_with_rollback "$tmp_file" "$conf_file"; then
+      error "补充 ACME 验证路径失败，已保留原配置：${conf_file}"
+      return 1
+    fi
     rm -f "$tmp_file"
   done
 }
@@ -3195,7 +3282,7 @@ ensure_http_challenge_server() {
   # 检测是否已存在“同域名 + 80监听”的配置
   if awk -v d="$domain" '
     BEGIN{in_server=0; has80=0; hasDomain=0}
-    /server\s*\{/ {in_server=1; has80=0; hasDomain=0}
+    /server[[:space:]]*\{/ {in_server=1; has80=0; hasDomain=0}
     in_server && /listen[[:space:]]+80([[:space:]]|;)/ {has80=1}
     in_server && index($0, "server_name") && index($0, d) {hasDomain=1}
     in_server && /}/ {
@@ -3228,7 +3315,7 @@ server {
 }
 EOF
 
-  ${SUDO} cp -a "$tmp_challenge" "$challenge_conf"
+  install_managed_file "$tmp_challenge" "$challenge_conf"
   rm -f "$tmp_challenge"
   echo "$challenge_conf"
 }
@@ -3755,6 +3842,7 @@ disable_https_for_conf_file() {
   local mode external_mode upstream_url stream_upstream_url source_site_url referer_url
   local stream_upstream_urls
   local listen_port existing_upstream host_header ssl_sni_line stream_mode stream_block tmp
+  local backend_port_meta backend_meta_line
 
   ensure_websocket_map
 
@@ -3787,6 +3875,7 @@ disable_https_for_conf_file() {
 
   listen_port="$(conf_meta_get "$conf_file" listen_port)"
   [[ -z "$listen_port" ]] && listen_port="80"
+  backend_port_meta="$(conf_meta_get "$conf_file" backend_port)"
 
   stream_mode="$(conf_meta_get "$conf_file" stream_mode)"
   stream_block=""
@@ -3802,8 +3891,15 @@ BLOCK
 )
   fi
 
-  existing_upstream="$(grep -Eo 'proxy_pass [^;]+' "$conf_file" | head -n1 | sed 's/^proxy_pass //')"
+  if [[ -n "$backend_port_meta" ]]; then
+    existing_upstream="http://127.0.0.1:${backend_port_meta}"
+  else
+    existing_upstream="$(extract_proxy_pass "$conf_file")"
+  fi
   [[ -z "$existing_upstream" ]] && existing_upstream="http://127.0.0.1:3000"
+  [[ -z "$backend_port_meta" ]] && backend_port_meta="$(url_explicit_port "$existing_upstream")"
+  backend_meta_line=""
+  [[ -n "$backend_port_meta" ]] && backend_meta_line="# backend_port=${backend_port_meta}"
 
   if [[ "$existing_upstream" =~ ^https?://127\.0\.0\.1(:[0-9]+)?(/|$) ]]; then
     # shellcheck disable=SC2016
@@ -3825,6 +3921,7 @@ BLOCK
 # managed_by=Nginx-X
 # domain=${domain}
 # listen_port=${listen_port}
+${backend_meta_line}
 # stream_mode=${stream_mode:-normal}
 
 server {
@@ -3952,7 +4049,7 @@ enable_https_for_domain_value() {
   local -a matches
   local idx conf_file
 
-  mapfile -t matches < <(awk -v d="$domain" 'FNR==1{found=0} $0=="# domain=" d {found=1} ENDFILE{if(found) print FILENAME}' "${CONF_DIR}"/*.conf 2>/dev/null || true)
+  mapfile -t matches < <(list_confs_by_meta_domain "$domain")
 
   if [[ ${#matches[@]} -eq 0 ]]; then
     error "未找到该域名对应配置：${domain}"
@@ -4053,7 +4150,7 @@ BLOCK
   trap 'rm -f "${tmp:-}"' RETURN
 
   # 复用原配置上游：优先读取注释元数据，避免同端口多域名场景误取到错误上游
-  local existing_upstream host_header ssl_sni_line backend_port_meta upstream_url_meta
+  local existing_upstream host_header ssl_sni_line backend_port_meta upstream_url_meta backend_meta_line
   upstream_url_meta="$(conf_meta_get "$conf_file" upstream_url)"
   backend_port_meta="$(conf_meta_get "$conf_file" backend_port)"
 
@@ -4066,6 +4163,9 @@ BLOCK
   fi
 
   [[ -z "$existing_upstream" ]] && existing_upstream="http://127.0.0.1:3000"
+  [[ -z "$backend_port_meta" ]] && backend_port_meta="$(url_explicit_port "$existing_upstream")"
+  backend_meta_line=""
+  [[ -n "$backend_port_meta" ]] && backend_meta_line="# backend_port=${backend_port_meta}"
 
   # 外部上游（尤其 https）需要 SNI 与上游 Host，避免 502/握手失败
   if [[ "$existing_upstream" =~ ^https?://127\.0\.0\.1(:[0-9]+)?(/|$) ]]; then
@@ -4092,6 +4192,7 @@ BLOCK
 # domain=${domain}
 # https_enabled=true
 # listen_port=${effective_https_port}
+${backend_meta_line}
 # stream_mode=${stream_mode:-normal}
 
 server {
@@ -4236,7 +4337,7 @@ show_nginx_realtime_status() {
     accepts="N/A"
     handled="N/A"
     requests="0"
-    qps="0"
+    qps="0.0"
 
     if [[ -n "$stat" ]]; then
       active="$(echo "$stat" | awk '/Active connections/ {print $3}')"
@@ -4249,8 +4350,7 @@ show_nginx_realtime_status() {
     fi
 
     if [[ $initialized -eq 1 ]]; then
-      qps=$((requests - prev_requests))
-      (( qps < 0 )) && qps=0
+      qps="$(awk -v current="$requests" -v previous="$prev_requests" 'BEGIN { delta=current-previous; if (delta<0) delta=0; printf "%.1f", delta/5 }')"
     fi
 
     cpu="$(ps -C nginx -o %cpu= 2>/dev/null | awk '{s+=$1} END {if(NR==0) print "0.0"; else printf "%.1f", s}')"
@@ -4697,4 +4797,6 @@ main() {
   done
 }
 
-main
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+  main
+fi

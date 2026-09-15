@@ -167,6 +167,7 @@ access_log /var/log/nginx/access.host.log nginxx_host;
 - `bash -n install.sh`
 - `shellcheck -x nx.sh install.sh`
 - `bash tests/https_config_regression.sh`
+- 真实 `nginx -t` 校验生成的内部与外部 HTTPS 配置
 
 本地也可以直接运行：
 
@@ -174,7 +175,7 @@ access_log /var/log/nginx/access.host.log nginxx_host;
 bash -n nx.sh
 bash -n install.sh
 shellcheck -x nx.sh install.sh tests/https_config_regression.sh
-bash tests/https_config_regression.sh
+for test_file in tests/*.sh; do bash "$test_file"; done
 ```
 
 ## 交互规范

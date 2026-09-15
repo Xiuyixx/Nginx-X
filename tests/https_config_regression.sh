@@ -18,6 +18,9 @@ exit 0
 EOF
 cat > "$MOCK_BIN/systemctl" <<'EOF'
 #!/usr/bin/env bash
+if [[ "${SYSTEMCTL_MOCK_FAIL:-0}" == "1" ]]; then
+  exit 1
+fi
 case "$1" in
   is-active) exit 1 ;;
   start|reload) exit 0 ;;
@@ -27,8 +30,8 @@ EOF
 chmod +x "$MOCK_BIN/nginx" "$MOCK_BIN/systemctl"
 export PATH="$MOCK_BIN:$PATH"
 
-# shellcheck disable=SC1091,SC1090
-source <(sed '$d' nx.sh)
+# shellcheck disable=SC1091
+source nx.sh
 
 # Make the test deterministic: don't depend on the host kernel IPv6 state.
 ipv6_available() { return 0; }
@@ -122,6 +125,7 @@ server {
 EOF
 mark_conf_manual_edited "$edited_conf"
 grep -q '^# edited=true$' "$edited_conf"
+[[ "$(stat -c '%a' "$edited_conf")" == "644" ]]
 if require_template_rebuild_safe "$edited_conf" "测试" >/dev/null 2>&1; then
   echo "manually edited config should not be considered safe for template rebuild" >&2
   exit 1
@@ -173,6 +177,16 @@ if grep -q '^# managed_by=Nginx-X$' "$rollback_import_conf"; then
 fi
 [[ ! -f "$CONF_DIR/rollback.example.com-80.conf" ]]
 
+reload_rollback_target="$TMPDIR_ROOT/reload-rollback.conf"
+reload_rollback_tmp="$TMPDIR_ROOT/reload-rollback.new"
+printf 'original\n' > "$reload_rollback_target"
+printf 'replacement\n' > "$reload_rollback_tmp"
+if SYSTEMCTL_MOCK_FAIL=1 apply_conf_with_rollback "$reload_rollback_tmp" "$reload_rollback_target" >/dev/null 2>&1; then
+  echo "config apply should fail when Nginx reload fails" >&2
+  exit 1
+fi
+[[ "$(cat "$reload_rollback_target")" == "original" ]]
+
 cert_ref_conf="$CONF_DIR/cert-ref.conf"
 cat > "$cert_ref_conf" <<EOF
 # managed_by=Nginx-X
@@ -204,6 +218,7 @@ cat > "$http_conf" <<'EOF'
 # managed_by=Nginx-X
 # domain=example.com
 # listen_port=80
+# backend_port=3000
 server {
     listen 80;
     server_name example.com;
@@ -226,14 +241,107 @@ if grep -q 'http2 on;' "$http_conf"; then
 fi
 # shellcheck disable=SC2016
 grep -Fq 'return 301 https://$host$request_uri;' "$http_conf"
+grep -q '^# backend_port=3000$' "$http_conf"
+
+disable_https_for_conf_file "example.com" "$http_conf"
+grep -q '^# backend_port=3000$' "$http_conf"
+grep -q 'proxy_pass http://127.0.0.1:3000;' "$http_conf"
 
 # URL parsing: IPv6 host extraction should handle bracketed addresses.
 [[ "$(url_host 'http://[2001:db8::1]:8080/path')" == "2001:db8::1" ]]
 [[ "$(url_host 'https://example.com:8443/a/b')" == "example.com" ]]
+[[ "$(url_explicit_port 'http://127.0.0.1:3000/path')" == "3000" ]]
+[[ "$(url_explicit_port 'https://[2001:db8::1]:8443/path')" == "8443" ]]
+[[ -z "$(url_explicit_port 'https://example.com/path')" ]]
+
+proxy_extract_conf="$TMPDIR_ROOT/proxy-extract.conf"
+cat > "$proxy_extract_conf" <<'EOF'
+location / {
+    proxy_pass http://localhost:9876/path;
+}
+EOF
+[[ "$(extract_proxy_pass "$proxy_extract_conf")" == "http://localhost:9876/path" ]]
+
+valid_url 'https://example.com/path'
+# shellcheck disable=SC2016
+if valid_url 'https://example.com/$PATH'; then
+  echo 'URL containing a shell variable should be rejected' >&2
+  exit 1
+fi
+
+# WebSocket map injection must roll nginx.conf back when nginx -t fails.
+NGINX_MAIN_CONF="$TMPDIR_ROOT/nginx.conf"
+cat > "$NGINX_MAIN_CONF" <<'EOF'
+events {}
+include /etc/nginx/conf.d/*.conf;
+http {
+}
+EOF
+nginx_main_before="$(cat "$NGINX_MAIN_CONF")"
+if NGINX_MOCK_FAIL=1 ensure_websocket_map >/dev/null 2>&1; then
+  echo 'WebSocket map injection should fail when nginx -t fails' >&2
+  exit 1
+fi
+[[ "$(cat "$NGINX_MAIN_CONF")" == "$nginx_main_before" ]]
+if find "$TMPDIR_ROOT" -maxdepth 1 -name 'nginx.conf.bak.*' | grep -q .; then
+  echo 'failed WebSocket map injection left a backup file behind' >&2
+  exit 1
+fi
+ensure_websocket_map >/dev/null
+# shellcheck disable=SC2016
+grep -Fq 'map $http_upgrade $connection_upgrade' "$NGINX_MAIN_CONF"
+
+STATE_DIR="$TMPDIR_ROOT/state"
+EMAIL_CONF="$STATE_DIR/email.conf"
+save_email 'user@example.com' >/dev/null
+[[ "$(stat -c '%a' "$EMAIL_CONF")" == "600" ]]
+
+DNS_CONF="$STATE_DIR/dns.conf"
+dns_marker="$TMPDIR_ROOT/dns-key-executed"
+dns_key="\$(touch ${dns_marker})\"quoted"
+save_dns_conf 'cloudflare' "$dns_key" 'second-key' >/dev/null 2>&1
+unset DNS_PROVIDER DNS_KEY1 DNS_KEY2
+load_dns_conf
+[[ "$DNS_PROVIDER" == 'cloudflare' ]]
+[[ "$DNS_KEY1" == "$dns_key" ]]
+[[ "$DNS_KEY2" == 'second-key' ]]
+[[ ! -e "$dns_marker" ]]
+[[ "$(stat -c '%a' "$DNS_CONF")" == "600" ]]
+
+meta_match_conf="$CONF_DIR/meta-match.conf"
+cat > "$meta_match_conf" <<'EOF'
+# managed_by=Nginx-X
+# domain=meta.example.com
+server { listen 80; }
+EOF
+meta_matches="$(list_confs_by_meta_domain 'meta.example.com')"
+grep -qF "$meta_match_conf" <<<"$meta_matches"
+
+acme_conf="$CONF_DIR/acme-rollback.conf"
+cat > "$acme_conf" <<'EOF'
+# managed_by=Nginx-X
+# domain=acme.example.com
+# listen_port=80
+# backend_port=3000
+server {
+    listen 80;
+    server_name acme.example.com;
+    location / { proxy_pass http://127.0.0.1:3000; }
+}
+EOF
+acme_before="$(cat "$acme_conf")"
+if NGINX_MOCK_FAIL=1 ensure_acme_location_for_domain_conf 'acme.example.com' >/dev/null 2>&1; then
+  echo 'ACME location update should fail when nginx -t fails' >&2
+  exit 1
+fi
+[[ "$(cat "$acme_conf")" == "$acme_before" ]]
+ensure_acme_location_for_domain_conf 'acme.example.com' >/dev/null
+grep -q '/\.well-known/acme-challenge/' "$acme_conf"
+[[ "$(stat -c '%a' "$acme_conf")" == "644" ]]
 
 # Emby/Lily split-proxy mode should support multiple stream upstreams.
 multi_stream_conf="$TMPDIR_ROOT/emby-multi-stream.conf"
-stream_urls="$(normalize_url_list 'https://stream-a.example.com, https://stream-b.example.com')"
+normalized_stream_urls="$(normalize_url_list 'https://stream-a.example.com, https://stream-b.example.com')"
 build_external_proxy_conf \
   "emby.example.com" \
   "80" \
@@ -244,7 +352,7 @@ build_external_proxy_conf \
   "https://stream-a.example.com" \
   "https://main.example.com" \
   "" \
-  "$stream_urls"
+  "$normalized_stream_urls"
 
 grep -q '^# stream_upstream_url=https://stream-a.example.com$' "$multi_stream_conf"
 grep -q '^# stream_upstream_urls=https://stream-a.example.com|https://stream-b.example.com$' "$multi_stream_conf"
