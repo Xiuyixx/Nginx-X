@@ -48,7 +48,7 @@ build_proxy_conf \
 build_external_proxy_conf \
   "external.example.com" \
   "18443" \
-  "https://upstream.example.com" \
+  "https://127.0.0.1:9443" \
   "normal" \
   "$CONF_DIR/external.conf" \
   "1"
