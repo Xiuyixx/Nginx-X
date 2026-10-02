@@ -6,7 +6,7 @@ out="${1:?output file required}"
 awk '/^# All modules load before/ { exit } { print }' "$root/nx.sh" > "$out"
 # Persist install identity before the execution guard; never derive it from PATH.
 printf '\nNX_INSTALLED_TARGET=%q\nNX_INSTALLED_REPO=%q\n' "${NX_BUNDLE_TARGET:-}" "${NX_BUNDLE_REPO:-}" >> "$out"
-for module in templates certificates transactions access https; do
+for module in templates certificates transactions access https diagnostics; do
   cat "$root/lib/$module.sh" >> "$out"
   printf '\n' >> "$out"
 done
