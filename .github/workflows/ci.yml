@@ -58,3 +58,22 @@ jobs:
               done
             '\''
           '
+
+  acme-isolated:
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        proof: [identity, lifecycle]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+      - name: Verify ACME identities and routing in disposable container
+        env:
+          ACME_PROOF: ${{ matrix.proof }}
+        run: |
+          docker run --rm -v "$PWD:/project:ro" -w /project \
+            -e ACME_PROOF="$ACME_PROOF" alpine:3.22 sh -ec '
+              apk add --no-cache bash nginx python3 openssl curl sudo shadow coreutils findutils procps util-linux
+              NX_ACME_ISOLATED=1 bash "tests/acme_${ACME_PROOF}_isolated.sh"
+            '

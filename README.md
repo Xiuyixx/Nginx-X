@@ -134,10 +134,11 @@ bash install.sh
    - 若存在 `/var/log/nginx/access.host.log`，会优先按 Host 专用日志做更精确统计
    - 若不存在 Host 专用日志，显示无法统计，不把普通 access.log 中缺失 Host 的记录当作零流量
    - 健康检查支持 `检查所有站点` / `检查单个站点`
-   - 健康检查内容包括：入口 URL、HTTP 状态码、DNS 解析结果、命中 IP
+   - 健康检查分别展示公网/CDN入口与本机监听结果；本机检查保留 Host/SNI 并校验证书，便于区分源站与公网路径故障
    - HTTPS 站点会额外显示证书剩余天数（可获取时）
    - 外部反代会额外显示主上游与推流上游（支持多个推流上游），便于排查
-   - 每 5 秒自动刷新，按回车返回上一级
+   - 每 5 秒自动刷新，按回车返回上一级；监控只读，不自动创建状态入口或重载服务
+   - 状态不可用或首个速率样本显示 N/A；可按 [诊断与日志配置说明](docs/diagnostics.md) 显式启用状态入口、端口/别名统计及日志轮转
 
 5. **卸载**
    - 选项1：卸载脚本（彻底卸载本脚本并清理）
@@ -156,6 +157,8 @@ bash install.sh
 - 包管理器自动检测（apt / yum / dnf / apk / opkg）
 - 脚本需要 Bash；部分操作另需 Python 3、OpenSSL 及标准文件工具。Alpine CI 安装这些运行依赖，不能据此推断所有精简 BusyBox 镜像都具备相同环境。
 - Nginx 安装后自动适配配置目录：Alpine 使用 `http.d`，其他系统使用 `conf.d`
+
+共享访问策略保存于 Nginx 配置目录中的 `.nx-access-state`，不随管理用户的 HOME 改变。邮箱、DNS API 等个人凭据仍保留在用户配置目录。旧策略迁移优先保留已有严格规则，避免切换管理员导致站点开放。
 
 ## 已知限制
 
@@ -199,3 +202,5 @@ bash tools/build-bundle.sh /tmp/nx-bundle
 ```
 
 真实请求测试需要 `nginx`、Python 3、OpenSSL 和 curl；可通过 `NGINX_BIN` 指定隔离二进制。测试使用临时配置、证书、PID、日志和高位端口，不操作系统 Nginx 服务。CI 在 Ubuntu 22.04、Ubuntu 24.04 和 Alpine 3.22 中安装依赖并运行回归，覆盖 mock 回滚、真实 HTTP/TLS 请求、IPv6、ACME、默认站点和 HTTPS 保留。Ubuntu 任务还检查全部源码及生成 bundle 的 ShellCheck。OpenWrt/CentOS 的完整实机生命周期不在当前 CI 覆盖范围内。
+
+证书权限说明：普通用户保留自己的 ACME 账户与 API 凭据；受保护的部署程序负责安装私钥并重载服务。签发及自定义 hook 仍以原用户身份执行，续期调度不依赖交互 sudo 缓存，也不添加 NOPASSWD 规则。新增的 ACME 身份与生命周期测试只能在一次性容器中开启 `NX_ACME_ISOLATED=1`，不要在实际服务器直接执行这些隔离测试。CI 使用独立容器分别执行两项验证。
