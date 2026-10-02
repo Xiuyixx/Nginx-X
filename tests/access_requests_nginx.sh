@@ -101,8 +101,11 @@ EOF
 }
 EOF
 }
-site alpha strict "127.0.0.1:$HTTP_PORT" > "$CONF_DIR/alpha.conf"
-site alpha strict "127.0.0.1:$TLS_PORT" 1 | sed '/^# managed_by=/d; /^# access_policy=/d' >> "$CONF_DIR/alpha.conf"
+# One server deliberately shares HTTP/TLS listeners: HTTP has no SNI.
+site alpha strict "127.0.0.1:$TLS_PORT" 1 |
+  sed "/listen .* ssl;/a\\  listen 127.0.0.1:$HTTP_PORT;" |
+  awk '/^#/ {print; next} {printf "%s ", $0} END {print ""}' > "$CONF_DIR/alpha.conf"
+ensure_ssl_directives_present "$CONF_DIR/alpha.conf"
 site beta inherit "127.0.0.1:$HTTP_PORT" > "$CONF_DIR/beta.conf"
 site beta inherit "127.0.0.1:$TLS_PORT" 1 | sed '/^# managed_by=/d; /^# access_policy=/d' >> "$CONF_DIR/beta.conf"
 site exact strict "127.0.0.2:$EXACT_PORT" > "$CONF_DIR/exact.conf"

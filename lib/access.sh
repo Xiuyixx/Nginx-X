@@ -3,8 +3,37 @@
 # Policy metadata: access_policy=inherit|strict|open; access_default=<socket>[,...].
 # Socket identity is an IP literal plus port (wildcard IPv4 is 0.0.0.0:PORT).
 
+# Shared policy is data, never shell code. Personal email/DNS credentials stay
+# in STATE_DIR. On first use preserve any deployed legacy strict policy even
+# when the first administrator has no personal legacy state.
 domain_only_state_is_enabled() {
-  [[ -f "$DOMAIN_ONLY_STATE" ]] && grep -qx 'DOMAIN_ONLY=1' "$DOMAIN_ONLY_STATE"
+  if [[ -f "$DOMAIN_ONLY_STATE" ]]; then
+    grep -qx 'DOMAIN_ONLY=1' "$DOMAIN_ONLY_STATE"
+    return
+  fi
+  [[ -f "$STATE_DIR/domain-only.conf" ]] && grep -qx 'DOMAIN_ONLY=1' "$STATE_DIR/domain-only.conf" && return 0
+  local file
+  while IFS= read -r file; do
+    if grep -q '^ *# nx-access-begin$' "$file" &&
+       ! grep -qE '^# access_policy=(strict|open)$' "$file"; then return 0; fi
+  done < <(list_managed_conf_files 1)
+  # Legacy catchalls predate explicit per-site policy metadata.
+  if [[ -f "$(domain_only_conf_path)" ]] &&
+     ! grep -q '^# nx-access-catchall=1$' "$(domain_only_conf_path)"; then return 0; fi
+  return 1
+}
+
+nx_access_migrate_state() {
+  [[ ! -L "$DOMAIN_ONLY_STATE" ]] || { nx_access_error '策略状态不能是符号链接'; return 1; }
+  if [[ -e "$DOMAIN_ONLY_STATE" ]]; then
+    [[ "$(cat "$DOMAIN_ONLY_STATE")" == 'DOMAIN_ONLY=0' || "$(cat "$DOMAIN_ONLY_STATE")" == 'DOMAIN_ONLY=1' ]] || {
+      nx_access_error '共享策略状态无效'; return 1;
+    }
+    return 0
+  fi
+  local enabled=0
+  domain_only_state_is_enabled && enabled=1
+  nx_access_global_files "$enabled"
 }
 
 nx_access_error() { error "访问策略：$*" >&2; return 1; }
@@ -117,6 +146,9 @@ nx_access_parse() {
           canonical=ns[j]; gsub(/\\\./,".",canonical)
           guard=guard "    if ($ssl_server_name ~* \"^" ns[j] "\\.?$\") { set $nx_access_sni " canonical "; }\n"
         }
+        # Plain HTTP on a mixed listener has no SNI. Only TLS requests must
+        # match SNI; assigning Host for HTTP preserves the independent guards.
+        guard=guard "    if ($scheme = http) { set $nx_access_sni $host; }\n"
         guard=guard "    if ($nx_access_sni != $host) { return 444; }\n"
       }
       guard=guard "    # nx-access-end\n"
@@ -242,8 +274,16 @@ nx_access_sync_files() {
 }
 
 nx_access_global_files() {
-  mkdir -p "$(dirname "$DOMAIN_ONLY_STATE")" || return 1
-  printf 'DOMAIN_ONLY=%s\n' "$1" > "$DOMAIN_ONLY_STATE" && chmod 600 "$DOMAIN_ONLY_STATE"
+  [[ "$1" == 0 || "$1" == 1 ]] || return 1
+  [[ ! -L "$DOMAIN_ONLY_STATE" ]] || return 1
+  local tmp
+  tmp="$(mktemp)" || return 1
+  printf 'DOMAIN_ONLY=%s\n' "$1" > "$tmp"
+  if ! ${SUDO:-} mkdir -p "$(dirname "$DOMAIN_ONLY_STATE")" ||
+     ! ${SUDO:-} install -m 644 "$tmp" "$DOMAIN_ONLY_STATE"; then
+    rm -f "$tmp"; return 1
+  fi
+  rm -f "$tmp"
 }
 domain_only_enable() {
   nx_transaction nx_access_global_files 1 || return 1

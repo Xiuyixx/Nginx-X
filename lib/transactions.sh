@@ -13,7 +13,7 @@ nx_transaction() (
   exec {lock_fd}<"$CONF_DIR" || return 1
   flock -x "$lock_fd" || return 1
 
-  local snapshot rc=0 state_existed=0 main_existed=0
+  local snapshot rc=0 state_existed=0 main_existed=0 main_target=""
   # Read by ensure_websocket_map in nx.sh through Bash dynamic scope.
   # shellcheck disable=SC2034
   local NX_IN_TRANSACTION=1
@@ -21,6 +21,11 @@ nx_transaction() (
   if ! ${SUDO} cp -a "$CONF_DIR" "$snapshot/conf"; then
     rm -rf "$snapshot"
     return 1
+  fi
+  if [[ -L "$NGINX_MAIN_CONF" ]]; then
+    main_target="$(readlink -f "$NGINX_MAIN_CONF")" || { ${SUDO} rm -rf "$snapshot"; return 1; }
+    [[ -f "$main_target" ]] || { ${SUDO} rm -rf "$snapshot"; return 1; }
+    ${SUDO} cp -a "$main_target" "$snapshot/main-target" || { ${SUDO} rm -rf "$snapshot"; return 1; }
   fi
   if [[ -f "$NGINX_MAIN_CONF" ]]; then
     main_existed=1
@@ -43,7 +48,11 @@ nx_transaction() (
     done
     ${SUDO} cp -a "$snapshot/conf/." "$CONF_DIR/" || rc=1
     if (( main_existed )); then
+      ${SUDO} rm -f "$NGINX_MAIN_CONF" || rc=1
       ${SUDO} cp -a "$snapshot/main" "$NGINX_MAIN_CONF" || rc=1
+      if [[ -n "$main_target" ]]; then
+        ${SUDO} cp -a "$snapshot/main-target" "$main_target" || rc=1
+      fi
     fi
     if (( state_existed )); then
       ${SUDO} cp -a "$snapshot/state" "$DOMAIN_ONLY_STATE" || rc=1
@@ -60,7 +69,19 @@ nx_transaction() (
     fi
   }
   trap 'trap - HUP INT TERM; nx_transaction_restore; exit 1' HUP INT TERM
-  if "$@" && ensure_websocket_map && nx_access_sync_files && reload_nginx_safe; then
+  nx_transaction_changed() {
+    ${SUDO} diff -qr "$snapshot/conf" "$CONF_DIR" >/dev/null 2>&1 || return 0
+    if (( main_existed )); then
+      if [[ -n "$main_target" ]]; then
+        ${SUDO} cmp -s "$snapshot/main-target" "$main_target" || return 0
+      else
+        ${SUDO} cmp -s "$snapshot/main" "$NGINX_MAIN_CONF" || return 0
+      fi
+    elif [[ -e "$NGINX_MAIN_CONF" ]]; then return 0; fi
+    return 1
+  }
+  if nx_access_migrate_state && "$@" && ensure_websocket_map && nx_access_sync_files &&
+     { ! nx_transaction_changed || reload_nginx_safe; }; then
     trap - HUP INT TERM
     ${SUDO} rm -rf "$snapshot"
     return 0
@@ -116,6 +137,9 @@ apply_conf_with_rollback() {
 nx_move_conf() {
   nx_conf_path_allowed "$1" && nx_conf_path_allowed "$2" || return 1
   [[ -f "$1" && ! -e "$2" ]] || { error "源配置不存在或目标已存在。"; return 1; }
+  if [[ "$1" == *.conf && "$2" == *.bak ]] && declare -F nx_acme_before_site_remove >/dev/null; then
+    nx_acme_before_site_remove "$1" || return 1
+  fi
   ${SUDO} mv "$1" "$2"
 }
 
@@ -169,7 +193,13 @@ nx_site_https_toggle() {
   fi
 }
 
-nx_remove_conf() { nx_conf_path_allowed "$1" && ${SUDO} rm -f "$1"; }
+nx_remove_conf() {
+  nx_conf_path_allowed "$1" || return 1
+  if declare -F nx_acme_before_site_remove >/dev/null; then
+    nx_acme_before_site_remove "$1" || return 1
+  fi
+  ${SUDO} rm -f "$1"
+}
 
 # Every mutated site must be a regular immediate child of the snapshot directory.
 nx_conf_path_allowed() {

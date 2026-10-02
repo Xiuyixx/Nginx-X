@@ -131,7 +131,7 @@ if [[ $(id -u) == 0 ]] && command -v runuser >/dev/null 2>&1; then
 set -euo pipefail
 source "$1/nx.sh"
 CONF_DIR="$2/protected/conf"
-DOMAIN_ONLY_STATE="$2/protected/absent-state"
+DOMAIN_ONLY_STATE="$CONF_DIR/.nx-access-state"
 NGINX_MAIN_CONF="$2/protected/absent-main"
 SUDO=''
 nx_access_sync_files() { :; }

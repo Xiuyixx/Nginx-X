@@ -30,7 +30,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 STATE_DIR="${STATE_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/nginxx}"
 EMAIL_CONF="${STATE_DIR}/email.conf"
 DNS_CONF="${STATE_DIR}/dns.conf"
-DOMAIN_ONLY_STATE="${STATE_DIR}/domain-only.conf"
+DOMAIN_ONLY_STATE="${DOMAIN_ONLY_STATE:-$CONF_DIR/.nx-access-state}"
 REPO_URL="https://github.com/Xiuyixx/Nginx-X.git"
 REPO_BRANCH="main"
 REPO_INSTALL_DIR="${REPO_INSTALL_DIR:-/opt/Nginx-X}"
@@ -223,10 +223,6 @@ ensure_dirs() {
 # 写入 WebSocket upgrade map，避免对普通 HTTP 请求发送固定 Connection: upgrade
 ensure_websocket_map() {
   [[ -f "$NGINX_MAIN_CONF" ]] || return 0
-  if [[ "${NX_IN_TRANSACTION:-0}" != 1 ]]; then
-    nx_transaction true
-    return $?
-  fi
   local map_conf="${CONF_DIR}/00-websocket-map.conf"
 
   # Skip if nginx is not installed yet (no nginx.conf)
@@ -253,6 +249,13 @@ ensure_websocket_map() {
     END { exit found ? 0 : 1 }
   ' "$NGINX_MAIN_CONF" 2>/dev/null; then
     need_inject=1
+  fi
+
+  # Decide whether disk changes are needed before acquiring a transaction.
+  if [[ "$need_inject" == 0 && -f "$map_conf" ]]; then return 0; fi
+  if [[ "${NX_IN_TRANSACTION:-0}" != 1 ]]; then
+    nx_transaction true
+    return $?
   fi
 
   if [[ "$need_inject" -eq 1 ]]; then
@@ -908,7 +911,7 @@ conf_target_path() {
 # Shared source-offset parser, embedded so the single-file bundle stays standalone.
 nx_conf_query() {
   python3 - "$@" <<'PYCONF'
-import sys, re, ipaddress
+import sys, re, ipaddress, os
 operation, filename, *params = sys.argv[1:]
 def fail(message): raise ValueError(message)
 def socket(value, inspect=False):
@@ -923,150 +926,177 @@ def socket(value, inspect=False):
         host = host.lower().rstrip('.')
     if not number.isdigit() or not 1 <= int(number) <= 65535: fail('invalid port')
     return ('[' + host + ']' if ':' in host else host) + ':' + str(int(number))
-try:
-    text = open(filename, encoding='utf-8').read()
-    tokens = []
-    metadata = {}
-    depth = 0
-    i = 0
-    while i < len(text):
-        if text[i].isspace():
-            i += 1
-            continue
-        if text[i] == '#':
-            end = text.find('\n', i)
-            end = len(text) if end < 0 else end + 1
-            line_start = text.rfind('\n', 0, i) + 1
-            # Setters append metadata after server blocks. Only standalone
-            # top-level comments count, never strings or comments in a block.
-            if depth == 0 and not text[line_start:i].strip():
-                match = re.fullmatch(r'# ([A-Za-z_][A-Za-z_0-9]*)=([^\r\n]*)(?:\r?\n)?', text[i:end])
-                if match:
-                    metadata.setdefault(match[1], []).append((line_start, end, match[2]))
-            i = end
-            continue
-        start = i
-        if text[i] in '{};':
-            if text[i] == '{':
-                depth += 1
-            elif text[i] == '}':
-                depth -= 1
-            i += 1
-        else:
-            quote = None
-            while i < len(text):
-                c = text[i]
-                if c == '\\':
-                    i += 2
-                    continue
-                if quote:
-                    if c == quote:
-                        quote = None
-                    i += 1
-                    continue
-                if c in '\"\'':
-                    quote = c
-                    i += 1
-                    continue
-                if text.startswith('${', i):
-                    end = text.find('}', i + 2)
-                    if end < 0:
-                        fail('unterminated variable')
-                    i = end + 1
-                    continue
-                if c.isspace() or c in '{};#':
-                    break
+def inspect(filename, query=operation):
+    try:
+        text = open(filename, encoding='utf-8').read()
+        tokens = []
+        metadata = {}
+        depth = 0
+        i = 0
+        while i < len(text):
+            if text[i].isspace():
                 i += 1
-            if quote or i > len(text):
-                fail('unterminated quote/escape')
-        tokens.append((text[start:i], start, i))
+                continue
+            if text[i] == '#':
+                end = text.find('\n', i)
+                end = len(text) if end < 0 else end + 1
+                line_start = text.rfind('\n', 0, i) + 1
+                # Setters append metadata after server blocks. Only standalone
+                # top-level comments count, never strings or comments in a block.
+                if depth == 0 and not text[line_start:i].strip():
+                    match = re.fullmatch(r'# ([A-Za-z_][A-Za-z_0-9]*)=([^\r\n]*)(?:\r?\n)?', text[i:end])
+                    if match:
+                        metadata.setdefault(match[1], []).append((line_start, end, match[2]))
+                i = end
+                continue
+            start = i
+            if text[i] in '{};':
+                if text[i] == '{':
+                    depth += 1
+                elif text[i] == '}':
+                    depth -= 1
+                i += 1
+            else:
+                quote = None
+                while i < len(text):
+                    c = text[i]
+                    if c == '\\':
+                        i += 2
+                        continue
+                    if quote:
+                        if c == quote:
+                            quote = None
+                        i += 1
+                        continue
+                    if c in '\"\'':
+                        quote = c
+                        i += 1
+                        continue
+                    if text.startswith('${', i):
+                        end = text.find('}', i + 2)
+                        if end < 0:
+                            fail('unterminated variable')
+                        i = end + 1
+                        continue
+                    if c.isspace() or c in '{};#':
+                        break
+                    i += 1
+                if quote or i > len(text):
+                    fail('unterminated quote/escape')
+            tokens.append((text[start:i], start, i))
 
-    cursor = 0
-    def parse(nested=False):
-        global cursor
-        nodes = []
-        while cursor < len(tokens):
-            if tokens[cursor][0] == '}':
-                if not nested:
-                    fail('unexpected closing brace')
-                closing = tokens[cursor][2]
+        cursor = 0
+        def parse(nested=False):
+            nonlocal cursor
+            nodes = []
+            while cursor < len(tokens):
+                if tokens[cursor][0] == '}':
+                    if not nested:
+                        fail('unexpected closing brace')
+                    closing = tokens[cursor][2]
+                    cursor += 1
+                    return nodes, closing
+                args = []
+                start = tokens[cursor][1]
+                while cursor < len(tokens) and tokens[cursor][0] not in '{};':
+                    args.append(tokens[cursor][0])
+                    cursor += 1
+                if not args or cursor >= len(tokens):
+                    fail('incomplete directive')
+                delimiter, opening, end = tokens[cursor]
                 cursor += 1
-                return nodes, closing
-            args = []
-            start = tokens[cursor][1]
-            while cursor < len(tokens) and tokens[cursor][0] not in '{};':
-                args.append(tokens[cursor][0])
-                cursor += 1
-            if not args or cursor >= len(tokens):
-                fail('incomplete directive')
-            delimiter, opening, end = tokens[cursor]
-            cursor += 1
-            children = None
-            if delimiter == '{':
-                children, end = parse(True)
-            elif delimiter != ';':
-                fail('missing semicolon')
-            nodes.append(dict(args=args, start=start, end=end, opening=opening, children=children))
-        if nested:
-            fail('unclosed block')
-        return nodes, len(text)
+                children = None
+                if delimiter == '{':
+                    children, end = parse(True)
+                elif delimiter != ';':
+                    fail('missing semicolon')
+                nodes.append(dict(args=args, start=start, end=end, opening=opening, children=children))
+            if nested:
+                fail('unclosed block')
+            return nodes, len(text)
 
-    nodes, _ = parse()
-    def walk(nodes):
-        for n in nodes:
-            yield n
-            yield from walk(n['children'] or [])
-    servers = [n for n in nodes if n['args'] == ['server'] and n['children'] is not None]
-    def directives(n, key): return [x for x in n['children'] if x['args'][0] == key]
-    def unquote(s): return s[1:-1] if len(s)>1 and s[0] == s[-1] and s[0] in '\"\'' else s
-    rows = []
-    # Metadata and structural queries do not need resolvable listen sockets.
-    # Inspection retains hostnames; defaults/security operations require IPs.
-    if operation in ('keys', 'summary'):
-        for idx, srv in enumerate(servers):
-            names = [unquote(x) for n in directives(srv, 'server_name') for x in n['args'][1:]]
-            for n in directives(srv, 'listen'):
-                args = [unquote(x) for x in n['args'][1:]]
-                rows.append((idx, socket(args[0], inspect=True), 'ssl' in args[1:], names))
-    if operation == 'meta':
-        values = metadata.get(params[0], [])
-        if len(values)>1: fail('duplicate metadata: '+params[0])
-        print(values[0][2] if values else '')
-    elif operation == 'count': print(len(servers))
-    elif operation == 'locations': print(sum(n['args'][0]=='location' for n in walk(nodes)))
-    elif operation == 'proxy':
-        print(next((unquote(n['args'][1]) for n in walk(nodes) if n['args'][0]=='proxy_pass'), ''))
-    elif operation == 'keys':
-        print('\n'.join(sorted({name.lower().rstrip('.')+'|'+sock for _,sock,_,names in rows for name in names})))
-    elif operation == 'summary':
-        if not rows: fail('no explicit listeners')
-        row = next((r for r in rows if r[2]), rows[0])
-        if not row[3]: fail('no server_name')
-        domain=row[3][0]
-        if not re.fullmatch(r'[A-Za-z0-9_.-]+',domain) or domain in ('_', 'localhost'): fail('unsupported primary server_name')
-        backend=next((unquote(n['args'][1]) for n in walk(servers[row[0]]['children']) if n['args'][0]=='proxy_pass'), '')
-        if any(c in backend for c in '|\n\r'): fail('unsupported proxy_pass')
-        mode='external' if backend and not re.match(r'https?://(?:127\.0\.0\.1|localhost)(?=[:/]|$)',backend) else ''
-        print('|'.join([domain,row[1].rsplit(':',1)[1],backend,str(row[2]).lower(),mode]))
-    elif operation == 'defaults':
-        old = params[0].split(',') if params[0] else []
-        oldrows = params[1].splitlines()
-        newrows = params[2].splitlines()
-        def listeners(lines):
-            return [(p[1],p[2],p[0]) for p in (line.split('|') for line in lines) if len(p)>2]
-        before, after = listeners(oldrows), listeners(newrows)
-        mapping={}
-        for a,b in zip(before,after):
-            if a[1:]==b[1:]: mapping[a[0]]=b[0]
-        result=[]
-        for s in old:
-            s=socket(s); s=mapping.get(s,s)
-            if s in {r[0] for r in after} and s not in result: result.append(s)
-        print(','.join(result))
-    else: fail('unknown query')
-except (ValueError, OSError, UnicodeError, IndexError) as exc:
-    print('Config inspection refused: '+str(exc), file=sys.stderr)
-    sys.exit(1)
+        nodes, _ = parse()
+        if query == "tree": return nodes
+        def walk(nodes):
+            for n in nodes:
+                yield n
+                yield from walk(n['children'] or [])
+        servers = [n for n in nodes if n['args'] == ['server'] and n['children'] is not None]
+        def directives(n, key): return [x for x in n['children'] if x['args'][0] == key]
+        def unquote(s): return s[1:-1] if len(s)>1 and s[0] == s[-1] and s[0] in '\"\'' else s
+        rows = []
+        # Metadata and structural queries do not need resolvable listen sockets.
+        # Inspection retains hostnames; defaults/security operations require IPs.
+        if query in ('keys', 'summary', 'list'):
+            for idx, srv in enumerate(servers):
+                names = [unquote(x) for n in directives(srv, 'server_name') for x in n['args'][1:]]
+                for n in directives(srv, 'listen'):
+                    args = [unquote(x) for x in n['args'][1:]]
+                    rows.append((idx, socket(args[0], inspect=True), 'ssl' in args[1:], names))
+        if query == 'tls-check':
+            inherited = []
+            if params and os.path.isfile(params[0]):
+                main = inspect(params[0], 'tree')
+                inherited = [child for n in main if n['args'] == ['http'] for child in (n['children'] or [])]
+            for srv in servers:
+                if not any('ssl' in n['args'][2:] for n in directives(srv, 'listen')): continue
+                scope = srv['children'] + inherited
+                # Includes can supply certificates; nginx -t resolves them.
+                if any(n['args'][0] == 'include' or n['args'] == ['ssl_reject_handshake', 'on'] for n in scope): continue
+                for key in ('ssl_certificate', 'ssl_certificate_key'):
+                    if not any(n['args'][0] == key and len(n['args']) == 2 for n in scope): fail('TLS server missing ' + key)
+        elif query == 'list':
+            row = next((r for r in rows if r[2]), rows[0] if rows else None)
+            names = row[3] if row else []
+            values = metadata.get('access_policy', [])
+            policy = values[0][2] if len(values)==1 else ('invalid' if values else 'inherit')
+            fields = [filename, names[0] if names else '未知域名',
+                      ','.join(sorted({r[1] for r in rows})) or '未知监听',
+                      'HTTPS' if any(r[2] for r in rows) else 'HTTP', policy]
+            if any(any(c in field for c in '\t\r\n') for field in fields): fail('unsupported list field')
+            print('\t'.join(fields))
+        elif query == 'meta':
+            values = metadata.get(params[0], [])
+            if len(values)>1: fail('duplicate metadata: '+params[0])
+            print(values[0][2] if values else '')
+        elif query == 'count': print(len(servers))
+        elif query == 'locations': print(sum(n['args'][0]=='location' for n in walk(nodes)))
+        elif query == 'proxy':
+            print(next((unquote(n['args'][1]) for n in walk(nodes) if n['args'][0]=='proxy_pass'), ''))
+        elif query == 'keys':
+            print('\n'.join(sorted({name.lower().rstrip('.')+'|'+sock for _,sock,_,names in rows for name in names})))
+        elif query == 'summary':
+            if not rows: fail('no explicit listeners')
+            row = next((r for r in rows if r[2]), rows[0])
+            if not row[3]: fail('no server_name')
+            domain=row[3][0]
+            if not re.fullmatch(r'[A-Za-z0-9_.-]+',domain) or domain in ('_', 'localhost'): fail('unsupported primary server_name')
+            backend=next((unquote(n['args'][1]) for n in walk(servers[row[0]]['children']) if n['args'][0]=='proxy_pass'), '')
+            if any(c in backend for c in '|\n\r'): fail('unsupported proxy_pass')
+            mode='external' if backend and not re.match(r'https?://(?:127\.0\.0\.1|localhost)(?=[:/]|$)',backend) else ''
+            print('|'.join([domain,row[1].rsplit(':',1)[1],backend,str(row[2]).lower(),mode]))
+        elif query == 'defaults':
+            old = params[0].split(',') if params[0] else []
+            oldrows = params[1].splitlines()
+            newrows = params[2].splitlines()
+            def listeners(lines):
+                return [(p[1],p[2],p[0]) for p in (line.split('|') for line in lines) if len(p)>2]
+            before, after = listeners(oldrows), listeners(newrows)
+            mapping={}
+            for a,b in zip(before,after):
+                if a[1:]==b[1:]: mapping[a[0]]=b[0]
+            result=[]
+            for s in old:
+                s=socket(s); s=mapping.get(s,s)
+                if s in {r[0] for r in after} and s not in result: result.append(s)
+            print(','.join(result))
+        else: fail('unknown query')
+    except (ValueError, OSError, UnicodeError, IndexError) as exc:
+        print('Config inspection refused: '+str(exc), file=sys.stderr)
+        sys.exit(1)
+
+for filename in ([filename] + params if operation == 'list' else [filename]):
+    inspect(filename)
 PYCONF
 }
 
@@ -1334,22 +1364,9 @@ ensure_cert_for_domain_interactive() {
 
 # 若配置包含 ssl 监听，则必须同时包含证书指令，避免生成半截 HTTPS 配置
 ensure_ssl_directives_present() {
-  local conf_file="$1"
-
-  if grep -qE 'listen[[:space:]]+[^;]*[[:space:]]ssl([[:space:]]|;)' "$conf_file" 2>/dev/null; then
-    # “仅域名访问”catch-all 使用 ssl_reject_handshake 拒绝握手，无需证书
-    if grep -q 'ssl_reject_handshake' "$conf_file" 2>/dev/null; then
-      return 0
-    fi
-    if ! grep -qE '^[[:space:]]*ssl_certificate[[:space:]]+' "$conf_file" 2>/dev/null; then
-      error "检测到 HTTPS 监听，但缺少 ssl_certificate：${conf_file}"
-      return 1
-    fi
-    if ! grep -qE '^[[:space:]]*ssl_certificate_key[[:space:]]+' "$conf_file" 2>/dev/null; then
-      error "检测到 HTTPS 监听，但缺少 ssl_certificate_key：${conf_file}"
-      return 1
-    fi
-  fi
+  # Includes and inherited http-level certificates are resolved by nginx -t
+  # in the transaction. Structural parsing handles compact/quoted directives.
+  nx_conf_query tls-check "$1" "$NGINX_MAIN_CONF"
 }
 
 add_reverse_proxy() {
@@ -1649,18 +1666,15 @@ print_conf_list() {
   fi
 
   echo "可管理配置列表："
-  local f domain ports tls policy status rows effective
-  for f in "${FILES[@]}"; do
-    domain="$(extract_domain_from_conf "$CONF_DIR/$f")"
-    ports="未知监听"
-    if rows="$(nx_access_parse "$CONF_DIR/$f" 2>/dev/null)" && [[ -n "$rows" ]]; then
-      ports="$(cut -d '|' -f2 <<< "$rows" | sort -u | paste -sd ',' -)"
-    fi
-    tls="HTTP"; conf_https_enabled "$CONF_DIR/$f" && tls="HTTPS"
-    policy="$(conf_meta_get "$CONF_DIR/$f" access_policy)"
+  local f domain ports tls policy status effective records
+  effective="关闭"; domain_only_state_is_enabled && effective="开启"
+  local -a paths=()
+  for f in "${FILES[@]}"; do paths+=("$CONF_DIR/$f"); done
+  records="$(nx_conf_query list "${paths[@]}")" || return 1
+  while IFS=$'\t' read -r f domain ports tls policy; do
+    f="${f##*/}"
     case "$policy" in
       ''|inherit)
-        effective="关闭"; domain_only_state_is_enabled && effective="开启"
         policy="仅域名访问：${effective}（沿用原设置）" ;;
       strict) policy="仅域名访问：开启" ;;
       open) policy="仅域名访问：关闭" ;;
@@ -1669,7 +1683,7 @@ print_conf_list() {
     status="已停用"; [[ "$f" == *.conf ]] && status="已启用"
     echo "  ${i}) ${domain:-未知域名} | ${ports} | ${tls} | ${policy} | ${status} | ${f}"
     ((i+=1))
-  done
+  done <<< "$records"
   return 0
 }
 
