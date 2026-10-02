@@ -985,6 +985,11 @@ nx_acme_sync_routes() {
     found=0
     for file in "$CONF_DIR"/*.conf; do
       [[ -f "$file" && "$file" != "$helper" ]] || continue
+      # Maps, status servers and unrelated custom servers need no challenge
+      # transformation. Inspect names first; only matching port-80 sites enter
+      # the stricter preservation parser.
+      match="$(nx_conf_query keys "$file")" || return 1
+      if ! awk -F'|' -v domain="$domain" '$1==domain && $2 ~ /:80$/ {found=1} END {exit !found}' <<< "$match"; then continue; fi
       match="$(nx_https_transform challenge-probe "$file" "$domain" "$SSL_DIR" '')" || return 1
       if [[ "$match" == yes ]]; then
         tmp="$(mktemp)" || return 1

@@ -20,7 +20,7 @@ fi
 # HTTPS migration deliberately retains the ACME listener on privileged port 80.
 # Some nginx builds bind listeners during -t, so CI needs sudo for validation.
 nginx_test_command=("$NGINX_TEST_BIN")
-if [[ ${EUID:-0} -ne 0 ]] && command -v sudo >/dev/null 2>&1; then
+if [[ ${EUID:-0} -ne 0 ]] && command -v sudo >/dev/null 2>&1 && sudo -n true 2>/dev/null; then
   nginx_test_command=(sudo "$NGINX_TEST_BIN")
 fi
 openssl req -x509 -newkey rsa:2048 -nodes -days 1 -subj /CN=example.com -addext subjectAltName=DNS:example.com,DNS:alias.example.com \

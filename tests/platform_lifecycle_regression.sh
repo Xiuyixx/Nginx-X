@@ -82,7 +82,9 @@ chmod +x "$root/mock/git" "$root/mock/sudo"
 # git is intercepted by an explicit function because secure PATH excludes fixture bin.
 PATH="$root/mock:$root/other:$PATH" bash -c 'source "$1"; SUDO=sudo; mock_git="$2"; sudo(){ if [[ "$1" == git ]]; then shift; "$mock_git" "$@"; else command sudo "$@"; fi; }; update_script' _ "$root/bin/nx" "$root/mock/git"
 [[ -f "$root/bin/nx" && "$(cat "$root/other/nx")" == unrelated ]] || fail 'secure PATH update identity'
-PATH="$root/other:$PATH" bash -c 'source "$1"; SUDO=""; confirm(){ return 0; }; uninstall_script_only' _ "$root/bin/nx" >/dev/null
+printf 'DOMAIN_ONLY=1\n' > "$root/shared-policy"
+DOMAIN_ONLY_STATE="$root/shared-policy" PATH="$root/other:$PATH" bash -c 'source "$1"; SUDO=""; confirm(){ return 0; }; uninstall_script_only' _ "$root/bin/nx" >/dev/null
+grep -qx DOMAIN_ONLY=1 "$root/shared-policy"
 [[ ! -e "$root/bin/nx" && -f "$root/other/nx" ]] || fail 'uninstall identity'
 # Failed publication preserves the old executable and removes unique staging files.
 printf 'old executable\n' > "$root/bin/nx"

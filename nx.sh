@@ -15,7 +15,7 @@ NC='\033[0m'
 
 # ---------- 全局变量 ----------
 APP_NAME="Nginx-X"
-APP_VERSION="3.0.0 (2026-10-02)"
+APP_VERSION="3.1.0 (2026-10-02)"
 # Alpine 的 nginx 把 server 配置放在 http.d，其他系统用 conf.d
 if [[ -f /etc/nginx/http.d ]] || [[ -d /etc/nginx/http.d ]]; then
   CONF_DIR="/etc/nginx/http.d"
@@ -1027,7 +1027,7 @@ def inspect(filename, query=operation):
         rows = []
         # Metadata and structural queries do not need resolvable listen sockets.
         # Inspection retains hostnames; defaults/security operations require IPs.
-        if query in ('keys', 'summary', 'list'):
+        if query in ('keys', 'summary', 'list', 'traffic'):
             for idx, srv in enumerate(servers):
                 names = [unquote(x) for n in directives(srv, 'server_name') for x in n['args'][1:]]
                 for n in directives(srv, 'listen'):
@@ -1063,6 +1063,14 @@ def inspect(filename, query=operation):
         elif query == 'locations': print(sum(n['args'][0]=='location' for n in walk(nodes)))
         elif query == 'proxy':
             print(next((unquote(n['args'][1]) for n in walk(nodes) if n['args'][0]=='proxy_pass'), ''))
+        elif query == 'traffic':
+            base = os.path.basename(filename)
+            names = [name for _, _, _, aliases in rows for name in aliases]
+            if any(any(c in field for c in '|\r\n') for field in [filename] + names):
+                fail('unsupported traffic field')
+            print('SITE|' + base)
+            for name, port in sorted({(name.lower().rstrip('.'), sock.rsplit(':', 1)[1]) for _, sock, _, aliases in rows for name in aliases}):
+                print('KEY|' + base + '|' + name + '|' + port)
         elif query == 'keys':
             print('\n'.join(sorted({name.lower().rstrip('.')+'|'+sock for _,sock,_,names in rows for name in names})))
         elif query == 'summary':
@@ -1095,7 +1103,7 @@ def inspect(filename, query=operation):
         print('Config inspection refused: '+str(exc), file=sys.stderr)
         sys.exit(1)
 
-for filename in ([filename] + params if operation == 'list' else [filename]):
+for filename in ([filename] + params if operation in ('list', 'traffic') else [filename]):
     inspect(filename)
 PYCONF
 }
@@ -2617,7 +2625,6 @@ uninstall_script_only() {
 
   # 2) 清理脚本目录下运行状态文件
   rm -f "$EMAIL_CONF" 2>/dev/null || true
-  rm -f "$DOMAIN_ONLY_STATE" 2>/dev/null || true
 
   # 3) 给出手动删除路径（仅当不在系统通用 bin 目录），避免误导用户去清理 /usr/local/bin
   local dir_to_remove

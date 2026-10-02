@@ -26,21 +26,23 @@ CONF
 reload_nginx_safe() {
   nginx -t -c "$NGINX_MAIN_CONF" || return 1
   [[ ${FAIL_RELOAD:-0} == 0 ]] || return 8
-  nginx -s reload -c "$NGINX_MAIN_CONF"
+  if [[ -s /tmp/acme-test.pid ]]; then
+    nginx -s reload -c "$NGINX_MAIN_CONF"
+  else
+    nginx -c "$NGINX_MAIN_CONF"
+  fi
 }
 trap 'nginx -s quit -c "$NGINX_MAIN_CONF" >/dev/null 2>&1 || true' EXIT
 ensure_websocket_map() { :; }
-# Exercise the exact hook requested from the transaction owner. This adapter
-# can disappear after the integration commit wires the hook directly.
-if ! declare -f nx_transaction | grep -q nx_acme_sync_routes; then
-  eval "$(declare -f nx_transaction | sed 's/ensure_websocket_map \&\&/nx_acme_sync_routes \&\& ensure_websocket_map \&\&/')"
-fi
 # Legacy plain :80 site had a deployed cert before route markers existed.
 build_proxy_conf example.com 80 3000 "$CONF_DIR/legacy.conf"
-nx_acme_retain_conf_route "$CONF_DIR/legacy.conf"
+nx_transaction nx_remove_conf "$CONF_DIR/legacy.conf"
 [[ -f "$CONF_DIR/.nx-acme-example.com.state" ]]
-rm "$CONF_DIR/legacy.conf"
-nginx -c "$NGINX_MAIN_CONF"
+# The first transaction starts a real daemon. A second mutation must acquire
+# the lock while that daemon survives, with a bounded failure on regression.
+export NX_CONF_DIR="$CONF_DIR" SSL_DIR NGINX_MAIN_CONF DOMAIN_ONLY_STATE
+# shellcheck disable=SC2016 # expanded by the isolated child shell
+timeout 15 bash -c 'source "$1/nx.sh"; SUDO=""; reload_nginx_safe() { nginx -t -c "$NGINX_MAIN_CONF" && nginx -s reload -c "$NGINX_MAIN_CONF"; }; nx_transaction touch "$CONF_DIR/second-mutation"' _ "$(cd "$(dirname "$0")/.." && pwd)"
 NX_ACME_PENDING=example.com nx_transaction nx_acme_prepare_routes example.com
 build_proxy_conf example.com 8080 3000 /tmp/acme-plain
 nx_https_transform enable /tmp/acme-plain example.com "$SSL_DIR" 8443 > /tmp/acme-tls
@@ -55,6 +57,9 @@ for ((i=0;i<100;i++)); do
 done
 [[ "$headers" == *'301 Moved Permanently'* && "$headers" == *'https://example.com:8443/hello'* ]]
 [[ "$(request http://127.0.0.1/.well-known/acme-challenge/test)" == token ]]
+# shellcheck disable=SC2016 # literal nginx variables
+# An unmanaged map and unnamed status server may coexist with retained routes.
+printf 'map $request_method $acme_test_method { default 0; }\nserver { listen 127.0.0.1:8099; location / { return 200; } }\n' > "$CONF_DIR/status.conf"
 FAIL_RELOAD=1
 if disable_conf site.conf; then exit 1; fi
 [[ -f "$CONF_DIR/site.conf" && ! -f "$CONF_DIR/acme-challenge-example.com.conf" ]]

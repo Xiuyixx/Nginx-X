@@ -49,12 +49,21 @@ grep -q '本机直连' "$T/out"
 bash tools/build-bundle.sh "$T/bundle"
 bash -c 'source "$1"; declare -F nx_stub_status nx_traffic_rows health_probe_url >/dev/null' _ "$T/bundle"
 echo 'diagnostics regression: OK'
-# Batch interface must avoid per-file parser calls once shared parser supports it.
+# Exercise the production batch parser and count all Python processes in a refresh.
 (
-  nx_conf_query() {
-    [[ "$1" == traffic ]] || exit 9
-    printf 'SITE|site.conf\nKEY|site.conf|alias.example|18443\n'
-  }
+  python3() { echo python >> "$T/parser-count"; command python3 "$@"; }
+  printf 'server { listen 80; server_name Other.Example. other.example; }\n' > "$T/other.conf"
+  nx_conf_query traffic "$T/site.conf" "$T/other.conf" > "$T/records"
+  [[ "$(grep -c '^SITE|' "$T/records")" == 2 ]]
+  [[ "$(grep -c '^KEY|other.conf|other.example|80$' "$T/records")" == 1 ]]
+  : > "$T/parser-count"
   printf 'nx1 alias.example 0 18443 https alias.example\n' > "$T/log"
-  nx_traffic_rows "$T/log" "$T/site.conf" | grep -q '请求: 1'
+  nx_traffic_rows "$T/log" "$T/site.conf" "$T/other.conf" > "$T/traffic"
+  grep -q '请求: 1' "$T/traffic"
+  [[ "$(wc -l < "$T/parser-count")" == 1 ]]
+  cp "$T/site.conf" "$T/bad|name.conf"
+  if nx_conf_query traffic "$T/bad|name.conf" >/dev/null 2>&1; then exit 1; fi
+  printf 'server { listen 80; server_name "bad|name"; }\n' > "$T/bad.conf"
+  if nx_conf_query traffic "$T/bad.conf" >/dev/null 2>&1; then exit 1; fi
 )
+echo 'ok: production traffic batch uses one parser and rejects record delimiters'

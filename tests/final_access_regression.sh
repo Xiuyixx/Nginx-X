@@ -70,7 +70,7 @@ print_conf_list > "$T/list"
 [[ "$(grep -c 'site[0-9]*.test' "$T/list")" == 50 ]]
 printf 'PASS: shared policy, migration, symlink rollback, no-op, compact TLS; 50-site list %ss, one parser\n' "$((SECONDS-start))"
 # Lifecycle integration runs before site removal and shares its rollback.
-nx_acme_before_site_remove() {
+nx_acme_retain_conf_route() {
   [[ -f "$1" ]] || return 1
   printf '# challenge helper\n' > "$CONF_DIR/acme-challenge-test.conf"
   [[ ! -f "$T/hook-fail" ]]

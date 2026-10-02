@@ -38,6 +38,12 @@ nx_transaction() (
       return 1
     fi
   fi
+  # Service managers and daemonized nginx must not retain our flock. The
+  # transaction parent keeps its descriptor until commit/rollback completes.
+  nx_transaction_reload() (
+    exec {lock_fd}<&-
+    reload_nginx_safe
+  )
   nx_transaction_restore() {
     error "配置应用失败，正在恢复本次操作前的配置与访问策略。"
     # Only this configured directory is restored; never touch nginx system paths.
@@ -64,7 +70,7 @@ nx_transaction() (
       return 1
     fi
     ${SUDO} rm -rf "$snapshot"
-    if ! reload_nginx_safe; then
+    if ! nx_transaction_reload; then
       error "磁盘配置已恢复，但旧配置重载失败；请检查 Nginx 服务状态。"
     fi
   }
@@ -80,8 +86,8 @@ nx_transaction() (
     elif [[ -e "$NGINX_MAIN_CONF" ]]; then return 0; fi
     return 1
   }
-  if nx_access_migrate_state && "$@" && ensure_websocket_map && nx_access_sync_files &&
-     { ! nx_transaction_changed || reload_nginx_safe; }; then
+  if nx_access_migrate_state && "$@" && nx_acme_sync_routes && ensure_websocket_map && nx_access_sync_files &&
+     { ! nx_transaction_changed || nx_transaction_reload; }; then
     trap - HUP INT TERM
     ${SUDO} rm -rf "$snapshot"
     return 0
@@ -99,6 +105,7 @@ nx_write_conf() {
     error "目标配置已存在，拒绝覆盖：${target}"
     return 1
   fi
+  nx_acme_retain_conf_route "${old:-$target}" || return 1
   if [[ -n "$old" && -f "$old" ]]; then
     local metadata key value
     metadata="$(mktemp /tmp/nginxx-metadata-XXXXXX)" || return 1
@@ -137,9 +144,7 @@ apply_conf_with_rollback() {
 nx_move_conf() {
   nx_conf_path_allowed "$1" && nx_conf_path_allowed "$2" || return 1
   [[ -f "$1" && ! -e "$2" ]] || { error "源配置不存在或目标已存在。"; return 1; }
-  if [[ "$1" == *.conf && "$2" == *.bak ]] && declare -F nx_acme_before_site_remove >/dev/null; then
-    nx_acme_before_site_remove "$1" || return 1
-  fi
+  nx_acme_retain_conf_route "$1" || return 1
   ${SUDO} mv "$1" "$2"
 }
 
@@ -195,9 +200,7 @@ nx_site_https_toggle() {
 
 nx_remove_conf() {
   nx_conf_path_allowed "$1" || return 1
-  if declare -F nx_acme_before_site_remove >/dev/null; then
-    nx_acme_before_site_remove "$1" || return 1
-  fi
+  nx_acme_retain_conf_route "$1" || return 1
   ${SUDO} rm -f "$1"
 }
 

@@ -17,8 +17,9 @@ source nx.sh
 
 SUDO=""
 CONF_DIR="$TMPDIR_ROOT/conf.d"
-SSL_DIR="$TMPDIR_ROOT/ssl"
+DOMAIN_ONLY_STATE="$CONF_DIR/.nx-access-state"
 NGINX_MAIN_CONF="$TMPDIR_ROOT/nginx.conf"
+SSL_DIR="$TMPDIR_ROOT/ssl"
 mkdir -p "$CONF_DIR" "$SSL_DIR/external.example.com"
 
 ipv6_available() { return 1; }
@@ -62,7 +63,7 @@ build_external_proxy_conf \
   "1"
 
 nginx_cmd=(nginx)
-if [[ ${EUID:-0} -ne 0 ]] && command -v sudo >/dev/null 2>&1; then
+if [[ ${EUID:-0} -ne 0 ]] && command -v sudo >/dev/null 2>&1 && sudo -n true 2>/dev/null; then
   nginx_cmd=(sudo nginx)
 fi
 "${nginx_cmd[@]}" -t -p "$TMPDIR_ROOT/" -c "$NGINX_MAIN_CONF"

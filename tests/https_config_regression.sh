@@ -39,6 +39,8 @@ ipv6_available() { return 0; }
 # shellcheck disable=SC2034
 SUDO=""
 CONF_DIR="$TMPDIR_ROOT/conf.d"
+DOMAIN_ONLY_STATE="$CONF_DIR/.nx-access-state"
+NGINX_MAIN_CONF="$TMPDIR_ROOT/nginx.conf"
 SSL_DIR="$TMPDIR_ROOT/ssl"
 mkdir -p "$CONF_DIR" "$SSL_DIR/example.com"
 openssl req -x509 -newkey rsa:2048 -nodes -days 1 -subj /CN=example.com \
@@ -179,13 +181,13 @@ fi
 
 reload_rollback_target="$CONF_DIR/reload-rollback.conf"
 reload_rollback_tmp="$TMPDIR_ROOT/reload-rollback.new"
-printf 'original\n' > "$reload_rollback_target"
-printf 'replacement\n' > "$reload_rollback_tmp"
+printf '# original\n' > "$reload_rollback_target"
+printf '# replacement\n' > "$reload_rollback_tmp"
 if SYSTEMCTL_MOCK_FAIL=1 apply_conf_with_rollback "$reload_rollback_tmp" "$reload_rollback_target" >/dev/null 2>&1; then
   echo "config apply should fail when Nginx reload fails" >&2
   exit 1
 fi
-[[ "$(cat "$reload_rollback_target")" == "original" ]]
+[[ "$(cat "$reload_rollback_target")" == "# original" ]]
 
 cert_ref_conf="$CONF_DIR/cert-ref.conf"
 cat > "$cert_ref_conf" <<EOF

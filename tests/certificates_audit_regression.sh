@@ -8,6 +8,8 @@ trap 'rm -rf "$root"' EXIT
 SUDO=""
 SSL_DIR="$root/ssl"
 CONF_DIR="$root/conf"
+export DOMAIN_ONLY_STATE="$CONF_DIR/.nx-access-state"
+export NGINX_MAIN_CONF="$root/nginx.conf"
 mkdir -p "$SSL_DIR" "$CONF_DIR"
 # Override the acme home only in this isolated test process.
 export HOME="$root/home"

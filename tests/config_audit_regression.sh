@@ -7,13 +7,14 @@ T="$(mktemp -d)"
 trap 'rm -rf "$T"' EXIT
 CONF_DIR="$T/conf"; SSL_DIR="$T/ssl"; DOMAIN_ONLY_STATE="$T/state"
 SUDO=""
+NGINX_MAIN_CONF="$T/nginx.conf"
 mkdir -p "$CONF_DIR" "$SSL_DIR/example.com"
 NGINX_TEST_BIN="${NGINX_TEST_BIN:-$(command -v nginx || true)}"
 [[ -x "$NGINX_TEST_BIN" ]] || { echo 'Set NGINX_TEST_BIN to a real Nginx binary' >&2; exit 1; }
 # HTTPS transforms also generate a port-80 challenge listener. Elevate only
 # nginx -t; fixture writes must retain the unprivileged test user's ownership.
 nginx_test_command=("$NGINX_TEST_BIN")
-if [[ ${EUID:-0} -ne 0 ]] && command -v sudo >/dev/null 2>&1; then
+if [[ ${EUID:-0} -ne 0 ]] && command -v sudo >/dev/null 2>&1 && sudo -n true 2>/dev/null; then
   nginx_test_command=(sudo "$NGINX_TEST_BIN")
 fi
 openssl req -x509 -newkey rsa:2048 -nodes -days 1 -subj /CN=example.com -addext subjectAltName=DNS:example.com,DNS:external.example -keyout "$SSL_DIR/example.com/privkey.pem" -out "$SSL_DIR/example.com/fullchain.pem" >/dev/null 2>&1
