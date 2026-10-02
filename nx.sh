@@ -2668,9 +2668,23 @@ uninstall_nginx_only() {
   info "Nginx 软件包已卸载，配置、证书及日志已保留。"
 }
 
-uninstall_acme_only() {
-  warn "将彻底卸载 acme.sh 并清空证书/配置及邮箱信息。"
-  warn "将删除：$HOME/.acme.sh ${SSL_DIR} ${EMAIL_CONF}"
+# Dynamic locals are intentionally consumed by called functions in this subshell.
+# shellcheck disable=SC2030
+uninstall_acme_only() (
+  local uninstall_fd
+  exec {uninstall_fd}<"$SSL_DIR" || return 1
+  flock -x "$uninstall_fd" || return 1
+  # Read by certificate deletion through Bash dynamic scope.
+  # shellcheck disable=SC2034
+  local NX_ACME_LOCK_HELD=1
+  uninstall_acme_locked
+)
+uninstall_acme_locked() {
+  local owned domain
+  owned="$(nx_acme_owned_domains)" || return 1
+  warn "将卸载当前账户 acme.sh、邮箱及 DNS 配置；其他账户证书保留。"
+  warn "将删除当前账户证书：${owned:-（无）}"
+  warn "仍引用这些证书的站点需先停用；应用失败会恢复证书。"
   if ! confirm "确认继续卸载 Acme？"; then
     info "已取消。"
     return 0
@@ -2683,18 +2697,14 @@ uninstall_acme_only() {
 
   # Remove only this account's scheduler before deleting its executable.
   disable_acme_cron || return 1
-  if [[ $EUID -ne 0 ]]; then
-    nx_acme_privileged_paths
-    ${SUDO} rm -f "$NX_ACME_DISPATCH" "$NX_ACME_MANIFEST" || return 1
-  fi
+  while IFS= read -r domain; do
+    [[ -n "$domain" ]] || continue
+    nx_delete_certificate "$domain" || return 1
+  done <<< "$owned"
+  nx_acme_privileged_paths
+  ${SUDO} rm -f "$NX_ACME_DISPATCH" "$NX_ACME_MANIFEST" || return 1
   rm -rf "$HOME/.acme.sh" || return 1
-  ${SUDO} rm -rf "$SSL_DIR" || return 1
   rm -f "$EMAIL_CONF" "$DNS_CONF" || return 1
-  if command -v nginx >/dev/null 2>&1; then
-    nx_transaction nx_acme_sync_routes || return 1
-  else
-    nx_acme_sync_routes || return 1
-  fi
 
   info "Acme 及相关配置已清理完成。"
 }

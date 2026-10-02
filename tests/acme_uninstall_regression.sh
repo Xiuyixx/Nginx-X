@@ -10,6 +10,10 @@ SUDO=''
 SSL_DIR="$tmp/ssl"; CONF_DIR="$tmp/conf"; DOMAIN_ONLY_STATE="$tmp/policy"
 EMAIL_CONF="$tmp/email"; DNS_CONF="$tmp/dns"; NX_PERIODIC_DIR="$tmp/periodic"
 mkdir -p "$HOME/.acme.sh" "$SSL_DIR" "$CONF_DIR" "$NX_PERIODIC_DIR/daily" "$NX_PERIODIC_DIR/monthly"
+mkdir -p "$SSL_DIR/other.example"
+printf other-key > "$SSL_DIR/other.example/privkey.pem"
+printf other-chain > "$SSL_DIR/other.example/fullchain.pem"
+printf '# another account route\n' > "$CONF_DIR/acme-challenge-other.example.conf"
 printf keep > "$DOMAIN_ONLY_STATE"
 printf secret > "$DNS_CONF"
 printf email > "$EMAIL_CONF"
@@ -28,6 +32,9 @@ crontab() {
     cat > "$tmp/cron"
   fi
 }
+nx_acme_account_crontab() { crontab "$@"; }
+# shellcheck disable=SC2034
+nx_acme_privileged_paths() { NX_ACME_DISPATCH="$tmp/dispatcher"; NX_ACME_MANIFEST="$tmp/manifest"; }
 FAIL_READ=1
 if uninstall_acme_only; then exit 1; fi
 [[ -d "$HOME/.acme.sh" && -f "$DNS_CONF" && -d "$SSL_DIR" ]]
@@ -37,8 +44,11 @@ if uninstall_acme_only; then exit 1; fi
 [[ -d "$HOME/.acme.sh" && -f "$DNS_CONF" && -d "$SSL_DIR" ]]
 FAIL_CRON=0
 uninstall_acme_only
-[[ ! -e "$HOME/.acme.sh" && ! -e "$SSL_DIR" && ! -e "$DNS_CONF" && ! -e "$EMAIL_CONF" ]]
+[[ ! -e "$HOME/.acme.sh" && -d "$SSL_DIR" && ! -e "$DNS_CONF" && ! -e "$EMAIL_CONF" ]]
 [[ "$(cat "$DOMAIN_ONLY_STATE")" == keep ]]
+[[ "$(cat "$SSL_DIR/other.example/privkey.pem")" == other-key ]]
+[[ "$(cat "$SSL_DIR/other.example/fullchain.pem")" == other-chain ]]
+grep -q 'another account route' "$CONF_DIR/acme-challenge-other.example.conf"
 [[ ! -e "$NX_PERIODIC_DIR/daily/acme-renew" && ! -e "$NX_PERIODIC_DIR/monthly/acme-renew" ]]
 grep -Fxq '0 4 * * * /other/.acme.sh/acme.sh --cron --home /other/.acme.sh' "$tmp/cron"
 grep -Fxq '7 5 * * * backup' "$tmp/cron"

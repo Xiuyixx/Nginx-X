@@ -360,107 +360,36 @@ ensure_acme_installed() {
   info "acme.sh 安装成功。"
 }
 
-# Standalone persisted hook: works after the interactive shell exits and in bundles.
-nx_install_acme_reload_hook() {
-  nx_acme_check_account_identity || return 1
-  local hook="$HOME/.acme.sh/nginxx-reload" tmp
-  tmp="$(mktemp)" || return 1
-  cat > "$tmp" <<'HOOK'
-#!/bin/sh
-PATH=/usr/sbin:/usr/bin:/sbin:/bin
-export PATH
-if [ "$(id -u)" != 0 ]; then
-    exit 1 # This hook is used only by root-owned ACME accounts.
-fi
-nginx -t || exit $?
-if command -v systemctl >/dev/null 2>&1 && [ -d /run/systemd/system ]; then
-    exec systemctl reload nginx
-elif command -v rc-service >/dev/null 2>&1; then
-    exec rc-service nginx reload
-elif [ -x /etc/init.d/nginx ]; then
-    exec /etc/init.d/nginx reload
-else
-    exec nginx -s reload
-fi
-HOOK
-  install -m 0700 "$tmp" "$hook" || { rm -f "$tmp"; return 1; }
-  rm -f "$tmp"
-  printf '%s\n' "$hook"
-}
-
 nx_deploy_certificate() {
-  local domain="$1" hook reloadcmd
+  local domain="$1" stage
   valid_domain "$domain" || return 1
-  if [[ $EUID -ne 0 ]]; then
-    nx_acme_prepare_dispatch || return 1
-    local stage="$HOME/.acme.sh/nginxx-deploy/$domain"
-    (umask 077; mkdir -p "$stage") || return 1
-    local -a ecc=()
-    [[ ! -d "$HOME/.acme.sh/${domain}_ecc" ]] || ecc=(--ecc)
-    "$HOME/.acme.sh/acme.sh" --install-cert -d "$domain" "${ecc[@]}" \
-      --key-file "$stage/privkey.pem" --fullchain-file "$stage/fullchain.pem" --reloadcmd ':' || return 1
-    local manifest
-    manifest="$(mktemp)" || return 1
-    if ${SUDO} test -e "$NX_ACME_MANIFEST"; then
-      ${SUDO} cat "$NX_ACME_MANIFEST" > "$manifest" || { rm -f "$manifest"; return 1; }
-    fi
-    grep -Fxq "$domain" "$manifest" || printf '%s\n' "$domain" >> "$manifest"
-    ${SUDO} install -o root -g root -m 0600 "$manifest" "$NX_ACME_MANIFEST" || { rm -f "$manifest"; return 1; }
-    rm -f "$manifest"
-    ${SUDO} "$NX_ACME_DISPATCH" deploy
-    return $?
-  fi
-  ${SUDO} mkdir -p "${SSL_DIR}/${domain}" || return 1
-  hook="$(nx_install_acme_reload_hook)" || return 1
-  # POSIX shell quoting, because acme.sh persists and evaluates reloadcmd.
-  reloadcmd="'${hook//\'/\'\\\'\'}'"
-  [[ ! -f "${SSL_DIR}/${domain}/privkey.pem" ]] || chmod 0600 "${SSL_DIR}/${domain}/privkey.pem" || return 1
-  (umask 077; "$HOME/.acme.sh/acme.sh" --install-cert -d "$domain" \
-    --key-file "${SSL_DIR}/${domain}/privkey.pem" \
-    --fullchain-file "${SSL_DIR}/${domain}/fullchain.pem" \
-    --reloadcmd "$reloadcmd") || { error "证书部署或重载钩子失败。"; return 1; }
-  [[ -s "${SSL_DIR}/${domain}/privkey.pem" && -s "${SSL_DIR}/${domain}/fullchain.pem" ]] || {
-    error "证书部署未生成完整文件。"; return 1;
-  }
+  nx_acme_check_account_identity || return 1
+  nx_acme_prepare_dispatch || return 1
+  stage="$HOME/.acme.sh/nginxx-deploy/$domain"
+  (umask 077; mkdir -p "$stage") || return 1
+  local -a ecc=()
+  [[ ! -d "$HOME/.acme.sh/${domain}_ecc" ]] || ecc=(--ecc)
+  (
+    # Cron must not read an account pair while acme.sh is still writing it.
+    exec {stage_lock_fd}<"$SSL_DIR" || exit 1
+    flock -x "$stage_lock_fd" || exit 1
+    (
+      exec {stage_lock_fd}<&-
+      umask 077
+      "$HOME/.acme.sh/acme.sh" --install-cert -d "$domain" "${ecc[@]}" \
+        --key-file "$stage/privkey.pem" --fullchain-file "$stage/fullchain.pem" --reloadcmd ':'
+    )
+  ) || return 1
+  nx_acme_register_domain "$domain" || return 1
+  ${SUDO} "$NX_ACME_DISPATCH" deploy
 }
 
 ensure_acme_cron() {
-  if [[ $EUID -ne 0 ]]; then
-    nx_acme_privileged_paths
-    ${SUDO} test -x "$NX_ACME_DISPATCH" || { error "请先完成证书部署。"; return 1; }
-    nx_acme_privileged_cron enable || return 1
-    # Retire only this owner’s old user scheduler after the root job exists.
-    NX_ACME_USER_CRON_ONLY=1 disable_acme_cron
-    return $?
-  fi
-  local current updated periodic="${NX_PERIODIC_DIR:-/etc/periodic}" script
-  current=""
-  if command -v crontab >/dev/null 2>&1; then
-    current="$(nx_acme_read_crontab nx_acme_account_crontab)" || return 1
-  fi
-  # Rewrite only renewal commands belonging to this acme home. Keep their
-  # arguments, environment and all unrelated cron jobs byte-for-byte.
-  updated="$(printf '%s\n' "$current" | nx_acme_cron_filter daily)" || return 1
-  if command -v crontab >/dev/null 2>&1; then
-    printf '%s\n' "$updated" | nx_acme_account_crontab - || return 1
-  elif [[ -d "$periodic" ]]; then
-    script="$periodic/daily/acme-renew"
-    if [[ -e "$script" ]] && ! nx_acme_periodic_owned "$script"; then
-      error "每日任务路径属于其他账户，已保留：$script"; return 1
-    fi
-    [[ ${EUID:-$(id -u)} -eq 0 ]] || { error "系统 periodic 任务仅支持当前 root ACME 账户。"; return 1; }
-    ${SUDO} mkdir -p "$periodic/daily" || return 1
-    printf '#!/bin/sh\n"%s/.acme.sh/acme.sh" --cron --home "%s/.acme.sh" >/dev/null\n' "$HOME" "$HOME" | ${SUDO} tee "$script" >/dev/null || return 1
-    ${SUDO} chmod 0755 "$script" || return 1
-  else
-    error "没有可用的每日续期调度器。"; return 1
-  fi
-  # Remove only the legacy script generated for this same account.
-  script="$periodic/monthly/acme-renew"
-  if nx_acme_periodic_owned "$script"; then
-    ${SUDO} rm -f "$script" || return 1
-  fi
-  info "已配置每日 ACME 续期检查。"
+  nx_acme_privileged_paths
+  ${SUDO} test -x "$NX_ACME_DISPATCH" || { error "请先完成证书部署。"; return 1; }
+  nx_acme_privileged_cron enable || return 1
+  # Retire only this account's legacy jobs after the protected job exists.
+  NX_ACME_USER_CRON_ONLY=1 disable_acme_cron
 }
 
 # Parse shell words rather than matching substrings: acme.sh quotes its path,
@@ -512,10 +441,8 @@ nx_acme_periodic_owned() {
 }
 
 has_acme_cron_task() {
-  if [[ $EUID -ne 0 ]]; then
-    nx_acme_privileged_paths
-    if ${SUDO} crontab -l 2>/dev/null | grep -Fxq "0 3 * * * $NX_ACME_DISPATCH cron"; then return 0; fi
-  fi
+  nx_acme_privileged_paths
+  if ${SUDO} crontab -l 2>/dev/null | grep -Fxq "0 3 * * * $NX_ACME_DISPATCH cron"; then return 0; fi
   local script
   if nx_acme_account_crontab -l 2>/dev/null | nx_acme_cron_filter probe; then return 0; fi
   for script in "${NX_PERIODIC_DIR:-/etc/periodic}"/{daily,monthly}/acme-renew; do
@@ -525,7 +452,7 @@ has_acme_cron_task() {
 }
 
 disable_acme_cron() {
-  if [[ $EUID -ne 0 && ${NX_ACME_USER_CRON_ONLY:-0} != 1 ]]; then
+  if [[ ${NX_ACME_USER_CRON_ONLY:-0} != 1 ]]; then
     nx_acme_privileged_cron remove || return 1
   fi
   local current script
@@ -547,13 +474,8 @@ disable_acme_cron() {
 # certificates or enabling a deliberately disabled renewal schedule.
 nx_migrate_certificate_renewal() {
   [[ -x "$HOME/.acme.sh/acme.sh" ]] || return 0
-  local conf domain hook reloadcmd marker
-  if [[ $EUID -eq 0 ]]; then
-    hook="$(nx_install_acme_reload_hook)" || return 1
-    reloadcmd="'${hook//\'/\'\\\'\'}'"
-  else
-    reloadcmd=:
-  fi
+  nx_acme_check_account_identity || return 1
+  local conf domain marker
   for conf in "$HOME/.acme.sh"/*/*.conf; do
     [[ -f "$conf" && ! -L "$conf" ]] || continue
     domain="$(basename "$conf" .conf)"
@@ -576,8 +498,8 @@ PYWEBROOTMIGRATE
     fi
     # Read data without sourcing acme account files. Only migrate certificates
     # already deployed to this manager’s exact destinations.
-    marker="$(python3 - "$conf" "$SSL_DIR/$domain" "$reloadcmd" <<'PYMIGRATE'
-import sys, shlex, base64
+    marker="$(python3 - "$conf" "$SSL_DIR/$domain" <<'PYMIGRATE'
+import sys, shlex
 values = {}
 for line in open(sys.argv[1]):
     if "=" not in line: continue
@@ -587,22 +509,11 @@ for line in open(sys.argv[1]):
         if len(parts) == 1: values[key] = parts[0]
     except ValueError: pass
 if values.get("Le_RealKeyPath") == sys.argv[2]+"/privkey.pem" and values.get("Le_RealFullChainPath") == sys.argv[2]+"/fullchain.pem":
-    hook = values.get("Le_ReloadCmd", "")
-    expected = sys.argv[3]
-    encoded = "__ACME_BASE64__START_" + base64.b64encode(expected.encode()).decode() + "__ACME_BASE64__END_"
-    print("done" if hook in (expected, encoded) else "migrate")
+    print("migrate")
 PYMIGRATE
 )" || return 1
     [[ "$marker" == migrate ]] || continue
-    if [[ $EUID -ne 0 ]]; then
-      nx_deploy_certificate "$domain" || return 1
-      continue
-    fi
-    local -a ecc=()
-    [[ "$(dirname "$conf")" != *_ecc ]] || ecc=(--ecc)
-    "$HOME/.acme.sh/acme.sh" --install-cert -d "$domain" "${ecc[@]}" \
-      --key-file "$SSL_DIR/$domain/privkey.pem" --fullchain-file "$SSL_DIR/$domain/fullchain.pem" \
-      --reloadcmd "$reloadcmd" || return 1
+    nx_deploy_certificate "$domain" || return 1
   done
   if has_acme_cron_task; then ensure_acme_cron || return 1; fi
 }
@@ -1040,8 +951,8 @@ sys.exit(0 if re.sub(r'\s+',' ',text).strip()==expected else 1)
 PYHELPER
 }
 
-# The privileged scheduler NEVER sources account files or executes the user's
-# ACME/hook as root. ACME stays in its original account, including DNS secrets.
+# The privileged scheduler keeps ACME and hooks in their original account.
+# Native root accounts must pass the same ownership checks on every execution.
 # Only this generated, root-owned dispatcher and manifest run privileged.
 nx_acme_privileged_paths() {
   NX_ACME_DISPATCH="/usr/local/libexec/nginxx-acme-$(id -u)"
@@ -1060,42 +971,151 @@ nx_acme_prepare_dispatch() {
 [[ $EUID == 0 ]] || exit 1
 as_account() { su -s /bin/sh "$account" -c "$1"; }
 quote() { printf "'%s'" "${1//\'/\'\\\'\'}"; }
+# Validate before opening the lock inode; a substituted FIFO must not block.
+python3 - "$ssl" <<'PYLOCKTRUST'
+import os,stat,sys
+path=sys.argv[1]
+while True:
+    s=os.lstat(path)
+    if not stat.S_ISDIR(s.st_mode) or s.st_uid or s.st_mode&0o022:
+        sys.exit('unsafe deployment lock directory: '+path)
+    if path=='/': break
+    path=os.path.dirname(path)
+PYLOCKTRUST
+# Lock order is deployment directory, then the configuration transaction.
+# Cron, interactive deployment and deletion all use this same inode.
+exec {deploy_fd}<"$ssl"
+flock -x "$deploy_fd"
+python3 - "$account" "$account_home" <<'PYROOTACCOUNT'
+import os,pwd,stat,sys
+if pwd.getpwnam(sys.argv[1]).pw_uid==0:
+    home=sys.argv[2]; paths=[]; parent=home
+    while True:
+        paths.append(parent)
+        if parent=='/': break
+        parent=os.path.dirname(parent)
+    for base,dirs,files in os.walk(home+'/.acme.sh',followlinks=False):
+        paths.append(base); paths.extend(os.path.join(base,n) for n in dirs+files)
+    for path in paths:
+        s=os.lstat(path)
+        if s.st_uid or s.st_mode&0o022 or (not stat.S_ISDIR(s.st_mode) and (not stat.S_ISREG(s.st_mode) or s.st_nlink!=1)):
+            sys.exit('unsafe root ACME account: '+path)
+PYROOTACCOUNT
 if [[ ${1:-} == cron ]]; then
-  as_account "HOME=$(quote "$account_home") $(quote "$account_home/.acme.sh/acme.sh") --cron --home $(quote "$account_home/.acme.sh")" || exit $?
+  (exec {deploy_fd}<&-; as_account "HOME=$(quote "$account_home") $(quote "$account_home/.acme.sh/acme.sh") --cron --home $(quote "$account_home/.acme.sh")") || exit $?
 fi
-[[ -f "$manifest" && ! -L "$manifest" ]] || exit 1
-while IFS= read -r domain; do
-  [[ $domain =~ ^[a-zA-Z0-9][a-zA-Z0-9.-]*$ && $domain != *..* ]] || exit 1
-  destination="$ssl/$domain"
-  [[ ! -L "$ssl" && ! -L "$destination" ]] || exit 1
-  install -d -m 0755 "$destination"
-  stage="$(mktemp -d "$destination/.deploy-XXXXXX")"
-  # Read as the owner: symlinks cannot trick root into exposing root-only files.
-  for name in privkey.pem fullchain.pem; do
-    if ! as_account "cat $(quote "$account_home/.acme.sh/nginxx-deploy/$domain/$name")" > "$stage/$name"; then
-      rm -rf "$stage"; exit 1
-    fi
-    [[ -s "$stage/$name" ]] || { rm -rf "$stage"; exit 1; }
-  done
-  chmod 0600 "$stage/privkey.pem"
-  chmod 0644 "$stage/fullchain.pem"
-  mv -f "$stage/privkey.pem" "$destination/privkey.pem"
-  mv -f "$stage/fullchain.pem" "$destination/fullchain.pem"
-  rmdir "$stage"
-done < "$manifest"
-nginx -t
-if command -v systemctl >/dev/null && [[ -d /run/systemd/system ]]; then
-  systemctl reload nginx
-elif command -v rc-service >/dev/null; then
-  rc-service nginx reload
-elif [[ -x /etc/init.d/nginx ]]; then
-  /etc/init.d/nginx reload
-else
-  nginx -s reload
-fi
+python3 - "$ssl" "$manifest" "$account" "$account_home" <<'PYPUBLISH'
+import os,sys,stat,tempfile,subprocess,shutil,glob,re,signal
+ssl,manifest,account,home=sys.argv[1:]
+def trusted(path, directory=False):
+    st=os.lstat(path)
+    if st.st_uid or st.st_mode & 0o022 or (not stat.S_ISDIR(st.st_mode) and (not stat.S_ISREG(st.st_mode) or st.st_nlink!=1)):
+        raise RuntimeError('unsafe privileged destination: '+path)
+    if directory:
+        if not stat.S_ISDIR(st.st_mode): raise RuntimeError('not a directory: '+path)
+    elif not stat.S_ISREG(st.st_mode) or st.st_nlink!=1:
+        raise RuntimeError('not a single-link regular file: '+path)
+    parent=os.path.dirname(path)
+    if path!='/': trusted(parent,True)
+def run(args,**kwargs):
+    return subprocess.run(args,check=True,close_fds=True,**kwargs)
+def reload():
+    run(['nginx','-t'])
+    if shutil.which('systemctl') and os.path.isdir('/run/systemd/system'):
+        run(['systemctl','reload','nginx'])
+    elif shutil.which('rc-service'): run(['rc-service','nginx','reload'])
+    elif os.access('/etc/init.d/nginx',os.X_OK): run(['/etc/init.d/nginx','reload'])
+    else: run(['nginx','-s','reload'])
+def output(args): return subprocess.check_output(args,stderr=subprocess.DEVNULL,close_fds=True)
+trusted(ssl,True); trusted(manifest)
+domains=open(manifest).read().splitlines()
+plans=[]; published=[]
+def interrupted(signum,frame): raise RuntimeError('deployment interrupted')
+for sig in (signal.SIGTERM,signal.SIGINT,signal.SIGHUP): signal.signal(sig,interrupted)
+try:
+    for domain in domains:
+        if not re.fullmatch(r'[a-zA-Z0-9][a-zA-Z0-9.-]*',domain) or '..' in domain:
+            raise RuntimeError('invalid domain')
+        for other in glob.glob(os.path.dirname(manifest)+'/acme-*.domains'):
+            trusted(other)
+            if other!=manifest and domain in open(other).read().splitlines():
+                raise RuntimeError('domain belongs to another ACME account: '+domain)
+        dest=ssl+'/'+domain
+        if not os.path.lexists(dest): os.mkdir(dest,0o755)
+        trusted(dest,True)
+        stage=tempfile.mkdtemp(prefix='.deploy-',dir=dest)
+        plans.append(stage)
+        for name in ('privkey.pem','fullchain.pem'):
+            target=dest+'/'+name
+            if os.path.lexists(target): trusted(target)
+            # Opening and reading happens with the account's privileges. A
+            # regular-file check prevents FIFOs/devices from blocking cron.
+            reader="import os,stat,sys; f=os.open(sys.argv[1],os.O_RDONLY|os.O_NONBLOCK|os.O_NOFOLLOW); s=os.fstat(f); assert stat.S_ISREG(s.st_mode) and s.st_nlink==1; sys.stdout.buffer.write(os.read(f,4194305))"
+            import shlex
+            cmd=shlex.join(['python3','-c',reader,home+'/.acme.sh/nginxx-deploy/'+domain+'/'+name])
+            with open(stage+'/'+name,'wb') as out: run(['su','-s','/bin/sh',account,'-c',cmd],stdout=out)
+            if not 0<os.path.getsize(stage+'/'+name)<=4194304: raise RuntimeError('invalid certificate size')
+            os.chmod(stage+'/'+name,0o600 if name=='privkey.pem' else 0o644)
+            if os.path.exists(target):
+                shutil.copy2(target,stage+'/'+name+'.old')
+                st=os.stat(target); os.chown(stage+'/'+name+'.old',st.st_uid,st.st_gid)
+        key=output(['openssl','pkey','-in',stage+'/privkey.pem','-pubout','-outform','DER'])
+        public=output(['openssl','x509','-in',stage+'/fullchain.pem','-pubkey','-noout'])
+        pub=run(['openssl','pkey','-pubin','-outform','DER'],input=public,stdout=subprocess.PIPE).stdout
+        if key!=pub: raise RuntimeError('certificate/private key mismatch')
+        run(['openssl','x509','-in',stage+'/fullchain.pem','-noout','-checkhost',domain],stdout=subprocess.DEVNULL)
+        # checkhost prints a mismatch with success on some OpenSSL versions.
+        import ssl as tls
+        cert=tls._ssl._test_decode_cert(stage+'/fullchain.pem')
+        names=[value for kind,value in cert.get('subjectAltName',()) if kind=='DNS']
+        if not names:
+            names=[value for rdns in cert.get('subject',()) for kind,value in rdns if kind=='commonName']
+        def matches(name):
+            name=name.lower(); host=domain.lower()
+            return name==host or (name.startswith('*.') and host.count('.')==name.count('.') and host.endswith(name[1:]))
+        if not any(matches(name) for name in names): raise RuntimeError('certificate does not cover domain')
+        run(['openssl','crl2pkcs7','-nocrl','-certfile',stage+'/fullchain.pem'],stdout=subprocess.DEVNULL)
+    for stage in plans:
+        dest=os.path.dirname(stage)
+        trusted(dest,True)
+        for name in ('privkey.pem','fullchain.pem'):
+            target=dest+'/'+name
+            if os.path.lexists(target): trusted(target)
+            # os.replace refuses directory targets instead of nesting files.
+            os.replace(stage+'/'+name,target)
+            published.append((stage,name,target))
+    reload()
+except BaseException:
+    failed=False
+    for stage,name,target in reversed(published):
+        try:
+            old=stage+'/'+name+'.old'
+            if os.path.exists(old): os.replace(old,target)
+            else: os.unlink(target)
+        except OSError as exc:
+            failed=True; print('rollback failed; backup retained: '+stage+': '+str(exc),file=sys.stderr)
+    if published:
+        try: reload()
+        except Exception: print('old files restored; nginx reload failed',file=sys.stderr)
+    if not failed:
+        for stage in plans: shutil.rmtree(stage)
+    raise
+else:
+    for stage in plans: shutil.rmtree(stage)
+PYPUBLISH
 DISPATCH
   } > "$tmp"
-  ${SUDO} install -d -m 0755 /usr/local/libexec /var/lib/nginxx "$SSL_DIR" || { rm -f "$tmp"; return 1; }
+  if ! ${SUDO} python3 - /usr/local/libexec /var/lib/nginxx "$SSL_DIR" <<'PYMKTRUST'
+import os,sys,stat
+def prepare(path):
+    if path!='/': prepare(os.path.dirname(path))
+    if not os.path.lexists(path): os.mkdir(path,0o755)
+    st=os.lstat(path)
+    if not stat.S_ISDIR(st.st_mode) or st.st_uid or st.st_mode&0o022:
+        sys.exit('unsafe privileged ACME directory: '+path)
+for path in sys.argv[1:]: prepare(os.path.abspath(path))
+PYMKTRUST
+  then rm -f "$tmp"; return 1; fi
   # Every privileged destination ancestor must resist the ACME account's writes.
   if ! ${SUDO} python3 - /usr/local/libexec /var/lib/nginxx "$SSL_DIR" <<'PYTRUST'
 import os,sys,stat
@@ -1109,6 +1129,15 @@ for path in sys.argv[1:]:
         path=os.path.dirname(path)
 PYTRUST
   then rm -f "$tmp"; return 1; fi
+  if ! ${SUDO} python3 - "$NX_ACME_DISPATCH" <<'PYDISPATCHTARGET'
+import os,stat,sys
+path=sys.argv[1]
+if os.path.lexists(path):
+    s=os.lstat(path)
+    if not stat.S_ISREG(s.st_mode) or s.st_nlink!=1 or s.st_uid or s.st_mode&0o022:
+        sys.exit('unsafe dispatcher target')
+PYDISPATCHTARGET
+  then rm -f "$tmp"; return 1; fi
   ${SUDO} install -o root -g root -m 0700 "$tmp" "$NX_ACME_DISPATCH" || { rm -f "$tmp"; return 1; }
   rm -f "$tmp"
 }
@@ -1116,7 +1145,7 @@ PYTRUST
 nx_acme_privileged_cron() {
   local mode="$1" current updated
   nx_acme_privileged_paths
-  command -v crontab >/dev/null 2>&1 || { error "非 root ACME 续期需要 crontab。"; return 1; }
+  command -v crontab >/dev/null 2>&1 || { error "ACME 续期需要 crontab。"; return 1; }
   local -a scheduler=(crontab)
   [[ -z "$SUDO" ]] || scheduler=("$SUDO" crontab)
   current="$(nx_acme_read_crontab "${scheduler[@]}")" || return 1
@@ -1165,15 +1194,52 @@ nx_acme_prepare_routes() {
   nx_acme_sync_routes
 }
 
-nx_acme_forget_deployment() {
-  [[ $EUID -ne 0 ]] || return 0
+# Manifest mutations serialize with publication on the SSL directory inode.
+# Called within the lock-owning uninstall subshell when present.
+# shellcheck disable=SC2031
+nx_acme_manifest_change() {
   nx_acme_privileged_paths
-  ${SUDO} test -f "$NX_ACME_MANIFEST" || return 0
-  local tmp
-  tmp="$(mktemp)" || return 1
-  ${SUDO} cat "$NX_ACME_MANIFEST" | awk -v domain="$1" '$0 != domain' > "$tmp" || { rm -f "$tmp"; return 1; }
-  ${SUDO} install -o root -g root -m 0600 "$tmp" "$NX_ACME_MANIFEST" || { rm -f "$tmp"; return 1; }
-  rm -f "$tmp"
+  ${SUDO} python3 - "$SSL_DIR" "$NX_ACME_MANIFEST" "$1" "$2" "${NX_ACME_LOCK_HELD:-0}" <<'PYMANIFEST'
+import os,sys,stat,glob,fcntl,tempfile
+ssl,manifest,domain,action,held=sys.argv[1:]
+fd=os.open(ssl,os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW)
+if held!='1': fcntl.flock(fd,fcntl.LOCK_EX)
+parent=os.path.dirname(manifest)
+# Legacy root deployments have no manifest to update.
+if action=='remove' and not os.path.lexists(manifest): sys.exit(0)
+for path in (ssl,parent):
+    while True:
+        st=os.lstat(path)
+        if not stat.S_ISDIR(st.st_mode) or st.st_uid or st.st_mode&0o022: sys.exit('unsafe manifest destination')
+        if path=='/': break
+        path=os.path.dirname(path)
+for other in glob.glob(parent+'/acme-*.domains'):
+    st=os.lstat(other)
+    if not stat.S_ISREG(st.st_mode) or st.st_nlink!=1 or st.st_uid or st.st_mode&0o022: sys.exit('unsafe manifest')
+    if other!=manifest and domain in open(other).read().splitlines(): sys.exit('domain belongs to another account')
+lines=open(manifest).read().splitlines() if os.path.exists(manifest) else []
+if action=='add' and domain not in lines: lines.append(domain)
+if action=='remove': lines=[x for x in lines if x!=domain]
+fd,tmp=tempfile.mkstemp(dir=parent)
+with os.fdopen(fd,'w') as out: out.write(''.join(x+'\n' for x in lines))
+os.replace(tmp,manifest)
+PYMANIFEST
+}
+nx_acme_register_domain() { nx_acme_manifest_change "$1" add; }
+nx_acme_forget_deployment() {
+  nx_acme_manifest_change "$1" remove
+}
+
+# Root and ordinary deletion refuse another account's explicitly owned domain.
+nx_acme_assert_domain_owner() {
+  nx_acme_privileged_paths
+  ${SUDO} python3 - "$NX_ACME_MANIFEST" "$1" <<'PYOWNER'
+import glob,sys
+manifest,domain=sys.argv[1:]
+for other in glob.glob('/var/lib/nginxx/acme-*.domains'):
+    if other!=manifest and domain in open(other).read().splitlines():
+        sys.exit('domain belongs to another ACME account: '+domain)
+PYOWNER
 }
 
 nx_acme_check_account_identity() {
@@ -1182,11 +1248,15 @@ nx_acme_check_account_identity() {
 import os,sys,stat
 home=sys.argv[1]
 paths=[home,home+'/.acme.sh']
+parent=os.path.dirname(home)
+while parent!='/':
+    paths.append(parent); parent=os.path.dirname(parent)
+paths.append('/')
 for base,dirs,files in os.walk(home+'/.acme.sh',followlinks=False):
     paths.extend(os.path.join(base,n) for n in dirs+files)
 for path in paths:
     st=os.lstat(path)
-    if st.st_uid!=0 or st.st_mode & 0o022 or stat.S_ISLNK(st.st_mode):
+    if st.st_uid!=0 or st.st_mode & 0o022 or (not stat.S_ISDIR(st.st_mode) and (not stat.S_ISREG(st.st_mode) or st.st_nlink!=1)):
         sys.exit('Refusing privileged execution of a non-root ACME account: '+path)
 PYIDENTITY
 }
@@ -1202,9 +1272,28 @@ nx_acme_account_crontab() {
 # Back up all account/deployed material before the first destructive action.
 # Config/helper removal is transactional; restore certificate material as well
 # if removal, validation, or reload fails.
-nx_delete_certificate() {
+# Dynamic lock locals are inherited from the uninstall caller, never read after it.
+# shellcheck disable=SC2031
+nx_delete_certificate() (
+  local certificate_lock_fd
+  exec {certificate_lock_fd}<"$SSL_DIR" || return 1
+  [[ ${NX_ACME_LOCK_HELD:-0} == 1 ]] || flock -x "$certificate_lock_fd" || return 1
+  # The service subprocess must not retain the outer deployment lock.
+  local original_reload
+  original_reload="$(declare -f reload_nginx_safe)" || return 1
+  eval "${original_reload/reload_nginx_safe/nx_certificate_reload_original}"
+  reload_nginx_safe() (
+    exec {certificate_lock_fd}<&-
+    if [[ -n ${uninstall_fd:-} ]]; then exec {uninstall_fd}<&-; fi
+    nx_certificate_reload_original
+  )
+  nx_delete_certificate_locked "$@" || return 1
+  NX_ACME_LOCK_HELD=1 nx_acme_forget_deployment "$1"
+)
+nx_delete_certificate_locked() {
   local domain="$1" backup path name rc=0
   valid_domain "$domain" || return 1
+  nx_acme_assert_domain_owner "$domain" || return 1
   [[ ! -x "$HOME/.acme.sh/acme.sh" ]] || nx_acme_check_account_identity || return 1
   backup="$(mktemp -d /tmp/nginxx-cert-delete-XXXXXX)" || return 1
   for name in ssl acme ecc staged; do
@@ -1228,7 +1317,6 @@ nx_delete_certificate() {
     ${SUDO} rm -rf "$SSL_DIR/$domain" || rc=1
   fi
   if (( ! rc )) && nx_transaction nx_acme_sync_routes; then
-    nx_acme_forget_deployment "$domain" || { error "证书已删除，但部署清单清理失败。"; return 1; }
     ${SUDO} rm -rf "$backup"
     return $?
   fi
@@ -1288,4 +1376,23 @@ nx_acme_retain_conf_route() {
     valid_domain "$name" || continue
     ${SUDO} touch "$CONF_DIR/.nx-acme-$name.state" || return 1
   done <<< "$rows"
+}
+
+# Explicit manifests are authoritative. Legacy accounts own only domains with
+# their own ACME account directory; never infer ownership from the shared SSL tree.
+nx_acme_owned_domains() {
+  nx_acme_privileged_paths
+  if ${SUDO} test -f "$NX_ACME_MANIFEST"; then
+    ${SUDO} cat "$NX_ACME_MANIFEST"
+  else
+    local path domain
+    for path in "$HOME/.acme.sh"/*; do
+      [[ -d "$path" && ! -L "$path" ]] || continue
+      domain="${path##*/}"; domain="${domain%_ecc}"
+      valid_domain "$domain" || continue
+      [[ -f "$path/$domain.conf" ]] || continue
+      nx_acme_assert_domain_owner "$domain" || return 1
+      printf '%s\n' "$domain"
+    done
+  fi
 }
