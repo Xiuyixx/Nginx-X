@@ -44,6 +44,9 @@ nx_access_error() { error "访问策略：$*" >&2; return 1; }
 # scan output: server-index|socket|ssl|default|names
 nx_access_parse() {
   local file="$1" mode="${2:-scan}" strict="${3:-0}" defaults="${4:-}"
+  local clean rc=0
+  clean="$(mktemp)" || return 1
+  nx_conf_query strip-access "$file" > "$clean" || { rm -f "$clean"; return 1; }
   awk -v mode="$mode" -v strict="$strict" -v defaults="$defaults" '
   function fail(s) { print "access policy: " FILENAME ": " s > "/dev/stderr"; bad=1; exit 1 }
   function ipv6(s, halves,l,r,nl,nr,i,out,a,b,parts,best,start,len,bestlen) {
@@ -98,17 +101,24 @@ nx_access_parse() {
     if(a[1]=="server_name") {
       if(names[active]!="") fail("multiple server_name directives")
       for(i=2;i<=n;i++) {
+        # Simple quoted DNS tokens have the same identity as bare names.
+        # Escapes/concatenated quotes remain unsupported, never guessed.
+        if(a[i] ~ /\\/) fail("escaped server_name is unsupported")
+        if(substr(a[i],1,1)=="\047" || substr(a[i],1,1)=="\042") {
+          q=substr(a[i],1,1)
+          if(length(a[i])<2 || substr(a[i],length(a[i]),1)!=q) fail("complex quoted server_name is unsupported")
+          a[i]=substr(a[i],2,length(a[i])-2)
+        }
+        if(a[i] ~ /[\047\042]/) fail("complex quoted server_name is unsupported")
         if(strict && a[i] ~ /^[0-9.]+$/) fail("strict policy requires DNS names, not IP addresses")
         if(strict && a[i] !~ /^[a-zA-Z0-9_-]+(\.[a-zA-Z0-9_-]+)*\.?$/) fail("strict policy requires literal DNS server_name aliases")
         names[active]=names[active] (i==2?"":" ") tolower(a[i])
       }
     }
   }
-  /^[ \t]*# nx-access-begin$/ {sub(/\n$/, "", text); skip=1; next}
-  /^[ \t]*# nx-access-end$/ {if(!skip) fail("orphan policy marker"); skip=0; next}
-  {if(skip) next; line=$0; sub(/ default_server # nx-access-default$/, "",line); text=text line "\n"}
+  {text=text $0 "\n"}
   END {
-    if(bad) exit 1; if(skip) fail("unterminated policy marker")
+    if(bad) exit 1
     canonical_defaults=""; nd=split(defaults,dparts,","); for(di=1;di<=nd;di++) if(dparts[di]!="") canonical_defaults=canonical_defaults (canonical_defaults==""?"":",") socket(dparts[di]); defaults=canonical_defaults
     depth=0; quote=""; comment=0; escape=0; token=""
     for(pos=1;pos<=length(text);pos++) {
@@ -155,13 +165,14 @@ nx_access_parse() {
       insertion[start[i]+1]=guard insertion[start[i]+1]
     }
     for(pos=1;pos<=length(text);pos++) printf "%s%s", insertion[pos], substr(text,pos,1)
-  }' "$file"
+  }' "$clean" || rc=$?
+  rm -f "$clean"
+  return "$rc"
 }
 
 nx_access_site_policy() {
   local p
-  [[ "$(grep -c '^# access_policy=' "$1" || true)" -le 1 ]] || { nx_access_error "重复策略元数据"; return 1; }
-  p="$(conf_meta_get "$1" access_policy)"
+  p="$(conf_meta_get "$1" access_policy)" || return 1
   case "$p" in ''|inherit) if domain_only_state_is_enabled; then echo strict; else echo open; fi;; strict|open) echo "$p";; *) nx_access_error "无效 access_policy: $p";; esac
 }
 
@@ -169,7 +180,7 @@ nx_access_metadata() {
   local file="$1" key="$2" value="$3" tmp
   [[ -f "$file" && ! -L "$file" ]] || return 1
   tmp="$(mktemp)" || return 1
-  if awk -v k="$key" -v v="$value" 'index($0,"# " k "=")==1 {next} {print} END {print "# " k "=" v}' "$file" > "$tmp"; then
+  if nx_conf_query metadata-set "$file" "$key" "$value" > "$tmp"; then
     ${SUDO:-} tee "$file" < "$tmp" >/dev/null || { rm -f "$tmp"; return 1; }
   else rm -f "$tmp"; return 1; fi
   rm -f "$tmp"

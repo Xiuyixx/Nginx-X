@@ -109,9 +109,9 @@ nx_write_conf() {
   if [[ -n "$old" && -f "$old" ]]; then
     local metadata key value
     metadata="$(mktemp /tmp/nginxx-metadata-XXXXXX)" || return 1
-    sed '/^# access_policy=/d; /^# access_default=/d' "$tmp" > "$metadata" || { rm -f "$metadata"; return 1; }
+    nx_conf_query metadata-drop "$tmp" access_policy access_default > "$metadata" || { rm -f "$metadata"; return 1; }
     for key in access_policy access_default; do
-      value="$(conf_meta_get "$old" "$key")"
+      value="$(conf_meta_get "$old" "$key")" || { rm -f "$metadata"; return 1; }
       if [[ "$key" == access_default && -n "$value" ]]; then
         local before after
         before="$(nx_access_parse "$old")" || { rm -f "$metadata"; return 1; }

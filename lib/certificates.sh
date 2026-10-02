@@ -1234,9 +1234,9 @@ nx_acme_forget_deployment() {
 nx_acme_assert_domain_owner() {
   nx_acme_privileged_paths
   ${SUDO} python3 - "$NX_ACME_MANIFEST" "$1" <<'PYOWNER'
-import glob,sys
+import glob,sys,os
 manifest,domain=sys.argv[1:]
-for other in glob.glob('/var/lib/nginxx/acme-*.domains'):
+for other in glob.glob(os.path.dirname(manifest)+'/acme-*.domains'):
     if other!=manifest and domain in open(other).read().splitlines():
         sys.exit('domain belongs to another ACME account: '+domain)
 PYOWNER
@@ -1275,38 +1275,64 @@ nx_acme_account_crontab() {
 # Dynamic lock locals are inherited from the uninstall caller, never read after it.
 # shellcheck disable=SC2031
 nx_delete_certificate() (
-  local certificate_lock_fd
+  local certificate_lock_fd certificate_conf_fd
   exec {certificate_lock_fd}<"$SSL_DIR" || return 1
   [[ ${NX_ACME_LOCK_HELD:-0} == 1 ]] || flock -x "$certificate_lock_fd" || return 1
+  exec {certificate_conf_fd}<"$CONF_DIR" || return 1
+  flock -x "$certificate_conf_fd" || return 1
   # The service subprocess must not retain the outer deployment lock.
   local original_reload
   original_reload="$(declare -f reload_nginx_safe)" || return 1
   eval "${original_reload/reload_nginx_safe/nx_certificate_reload_original}"
   reload_nginx_safe() (
     exec {certificate_lock_fd}<&-
+    exec {certificate_conf_fd}<&-
     if [[ -n ${uninstall_fd:-} ]]; then exec {uninstall_fd}<&-; fi
     nx_certificate_reload_original
   )
-  nx_delete_certificate_locked "$@" || return 1
-  NX_ACME_LOCK_HELD=1 nx_acme_forget_deployment "$1"
+  nx_delete_certificate_locked "$@"
 )
 nx_delete_certificate_locked() {
-  local domain="$1" backup path name rc=0
+  local domain="$1" backup path rc=0
   valid_domain "$domain" || return 1
   nx_acme_assert_domain_owner "$domain" || return 1
+  nx_acme_assert_unreferenced "$domain" || return 1
   [[ ! -x "$HOME/.acme.sh/acme.sh" ]] || nx_acme_check_account_identity || return 1
   backup="$(mktemp -d /tmp/nginxx-cert-delete-XXXXXX)" || return 1
-  for name in ssl acme ecc staged; do
-    case "$name" in
-      ssl) path="$SSL_DIR/$domain" ;;
-      acme) path="$HOME/.acme.sh/$domain" ;;
-      ecc) path="$HOME/.acme.sh/${domain}_ecc" ;;
-      staged) path="$HOME/.acme.sh/nginxx-deploy/$domain" ;;
-    esac
-    if [[ -e "$path" ]]; then
-      ${SUDO} cp -a "$path" "$backup/$name" || { ${SUDO} rm -rf "$backup"; return 1; }
+  local i failed
+  local -a paths=("$SSL_DIR/$domain" "$HOME/.acme.sh/$domain" "$HOME/.acme.sh/${domain}_ecc"
+    "$HOME/.acme.sh/nginxx-deploy/$domain" "$HOME/.acme.sh/account.conf" "$NX_ACME_MANIFEST")
+  for i in "${!paths[@]}"; do
+    path="${paths[$i]}"
+    if [[ -e "$path" || -L "$path" ]]; then
+      ${SUDO} cp -a -- "$path" "$backup/$i" || { ${SUDO} rm -rf "$backup"; return 1; }
     fi
   done
+  ${SUDO} cp -a "$CONF_DIR" "$backup/conf" || { ${SUDO} rm -rf "$backup"; return 1; }
+  nx_certificate_restore() {
+    failed=0
+    for i in "${!paths[@]}"; do
+      path="${paths[$i]}"
+      ${SUDO} rm -rf -- "$path" || failed=1
+      if [[ -e "$backup/$i" || -L "$backup/$i" ]]; then
+        ${SUDO} cp -a -- "$backup/$i" "$path" || failed=1
+      fi
+    done
+    # Keep the configuration directory inode: its flock is still held.
+    ${SUDO} find "$CONF_DIR" -mindepth 1 -maxdepth 1 -exec rm -rf -- {} + || failed=1
+    ${SUDO} cp -a "$backup/conf/." "$CONF_DIR/" || failed=1
+    if [[ ${NX_ACME_UNINSTALL_MODE:-online} != offline ]]; then
+      reload_nginx_safe || failed=1
+    fi
+    if (( failed )); then
+      error "证书恢复失败；备份保留：$backup"
+    else
+      ${SUDO} rm -rf "$backup"
+      error "证书删除失败，已恢复证书材料。"
+    fi
+    return 1
+  }
+  trap 'trap "" HUP INT TERM; nx_certificate_restore; exit 1' HUP INT TERM
   if [[ -x "$HOME/.acme.sh/acme.sh" ]]; then
     local -a ecc=()
     [[ ! -d "$HOME/.acme.sh/${domain}_ecc" ]] || ecc=(--ecc)
@@ -1316,30 +1342,12 @@ nx_delete_certificate_locked() {
     rm -rf "$HOME/.acme.sh/$domain" "$HOME/.acme.sh/${domain}_ecc" "$HOME/.acme.sh/nginxx-deploy/$domain" || rc=1
     ${SUDO} rm -rf "$SSL_DIR/$domain" || rc=1
   fi
-  if (( ! rc )) && nx_transaction nx_acme_sync_routes; then
-    ${SUDO} rm -rf "$backup"
-    return $?
-  fi
-  rc=0
-  for name in ssl acme ecc staged; do
-    case "$name" in
-      ssl) path="$SSL_DIR/$domain" ;;
-      acme) path="$HOME/.acme.sh/$domain" ;;
-      ecc) path="$HOME/.acme.sh/${domain}_ecc" ;;
-      staged) path="$HOME/.acme.sh/nginxx-deploy/$domain" ;;
-    esac
-    if [[ -e "$backup/$name" ]]; then
-      ${SUDO} rm -rf "$path" && ${SUDO} cp -a "$backup/$name" "$path" || rc=1
-    fi
-  done
-  if (( rc )); then
-    error "证书恢复失败；备份保留：$backup"
-  else
-    ${SUDO} rm -rf "$backup"
-    reload_nginx_safe || true
-    error "证书删除失败，已恢复证书材料。"
-  fi
-  return 1
+  if (( ! rc )); then nx_certificate_apply_removal || rc=1; fi
+  if (( ! rc )); then NX_ACME_LOCK_HELD=1 nx_acme_forget_deployment "$domain" || rc=1; fi
+  # No further mutations after commit; signals must not restore a deleted backup.
+  trap '' HUP INT TERM
+  if (( rc )); then nx_certificate_restore; return 1; fi
+  ${SUDO} rm -rf "$backup"
 }
 
 # A missing table is normal; permission/I/O errors must never be mistaken for
@@ -1396,3 +1404,157 @@ nx_acme_owned_domains() {
     done
   fi
 }
+
+# Inspect active includes (including custom paths), not server_name: aliases can
+# share another site's key. Offline is explicit and only for a removed nginx.
+nx_acme_assert_unreferenced() {
+  [[ ${NX_ACME_UNINSTALL_MODE:-online} != offline ]] || return 0
+  ${SUDO} python3 - "$NGINX_MAIN_CONF" "$CONF_DIR" "$SSL_DIR/$1" "$HOME/.acme.sh/$1" "$HOME/.acme.sh/${1}_ecc" <<'PYREF'
+import glob,os,shlex,sys
+main,conf,*roots=sys.argv[1:]
+roots=[os.path.realpath(p) for p in roots]
+seen=set()
+def scan(path):
+    path=os.path.realpath(path)
+    if path in seen: return
+    seen.add(path)
+    with open(path) as f:
+        lex=shlex.shlex(f, posix=True, punctuation_chars=';{}')
+        lex.whitespace_split=True
+        tokens=list(lex)
+    directive=[]
+    for token in tokens:
+        if token and all(c in ';{}' for c in token):
+            if directive:
+                key,*args=directive
+                if key=='include':
+                    if len(args)!=1 or '$' in args[0]: raise ValueError('ambiguous include')
+                    pattern=args[0] if os.path.isabs(args[0]) else os.path.join(os.path.dirname(main),args[0])
+                    matches=glob.glob(pattern)
+                    if not matches and not glob.has_magic(pattern): raise ValueError('missing include: '+pattern)
+                    for child in matches: scan(child)
+                elif key in ('ssl_certificate','ssl_certificate_key','ssl_trusted_certificate'):
+                    for value in args:
+                        if '$' in value: raise ValueError('dynamic certificate reference')
+                        value=os.path.realpath(value if os.path.isabs(value) else os.path.join(os.path.dirname(main),value))
+                        if any(value==r or value.startswith(r+os.sep) for r in roots):
+                            raise ValueError('active certificate reference in '+path)
+            directive=[]
+        else: directive.append(token)
+try:
+    if os.path.isfile(main): scan(main)
+    for path in glob.glob(conf+'/*.conf'): scan(path)
+except (OSError,ValueError) as e:
+    sys.exit(str(e))
+PYREF
+}
+
+nx_certificate_apply_removal() {
+  if [[ ${NX_ACME_UNINSTALL_MODE:-online} == offline ]]; then
+    nx_acme_sync_routes
+  else
+    # The normal transaction deliberately skips reload for identical configs;
+    # certificate bytes are outside that snapshot and MUST still be validated.
+    # The caller already owns the configuration lock. Its route backup keeps
+    # this operation atomic without recursively flocking that same directory.
+    nx_acme_sync_routes && reload_nginx_safe
+  fi
+}
+
+# Noninteractive account transaction. Caller owns confirmations, not rollback.
+# Usage: nx_acme_uninstall_account [online|offline]. Offline is reserved for a
+# successfully removed nginx package and does not test/start/reload nginx.
+# shellcheck disable=SC2030,SC2031
+nx_acme_uninstall_account() (
+  local NX_ACME_UNINSTALL_MODE="${1:-online}" NX_ACME_LOCK_HELD=1 uninstall_fd conf_fd
+  [[ $NX_ACME_UNINSTALL_MODE == online || $NX_ACME_UNINSTALL_MODE == offline ]] || return 1
+  [[ -d "$SSL_DIR" && ! -L "$SSL_DIR" && -d "$CONF_DIR" && ! -L "$CONF_DIR" ]] || return 1
+  exec {uninstall_fd}<"$SSL_DIR" || return 1
+  flock -x "$uninstall_fd" || return 1
+  exec {conf_fd}<"$CONF_DIR" || return 1
+  flock -x "$conf_fd" || return 1
+  local owned domain backup path i rc=0 original_reload
+  owned="$(nx_acme_owned_domains)" || return 1
+  while IFS= read -r domain; do
+    [[ -n "$domain" ]] || continue
+    valid_domain "$domain" && nx_acme_assert_domain_owner "$domain" && nx_acme_assert_unreferenced "$domain" || return 1
+  done <<< "$owned"
+  [[ ! -x "$HOME/.acme.sh/acme.sh" ]] || nx_acme_check_account_identity || return 1
+  nx_acme_privileged_paths
+  backup="$(mktemp -d /tmp/nginxx-acme-uninstall-XXXXXX)" || return 1
+  local -a paths=("$HOME/.acme.sh" "$EMAIL_CONF" "$DNS_CONF" "$NX_ACME_DISPATCH" "$NX_ACME_MANIFEST" "$CONF_DIR")
+  while IFS= read -r domain; do
+    [[ -z "$domain" ]] || paths+=("$SSL_DIR/$domain")
+  done <<< "$owned"
+  for path in "${NX_PERIODIC_DIR:-/etc/periodic}"/{daily,monthly}/acme-renew; do
+    if nx_acme_periodic_owned "$path"; then paths+=("$path"); fi
+  done
+  for i in "${!paths[@]}"; do
+    path="${paths[$i]}"
+    if [[ -e "$path" || -L "$path" ]]; then
+      ${SUDO} cp -a -- "$path" "$backup/$i" || { ${SUDO} rm -rf "$backup"; return 1; }
+    fi
+  done
+  local -a root_cron=(crontab)
+  [[ -z "$SUDO" ]] || root_cron=("$SUDO" crontab)
+  if ! nx_acme_read_crontab "${root_cron[@]}" > "$backup/root-cron" ||
+     ! nx_acme_read_crontab nx_acme_account_crontab > "$backup/account-cron"; then
+    ${SUDO} rm -rf "$backup"; return 1
+  fi
+  original_reload="$(declare -f reload_nginx_safe)" || { ${SUDO} rm -rf "$backup"; return 1; }
+  eval "${original_reload/reload_nginx_safe/nx_uninstall_reload_original}"
+  reload_nginx_safe() (
+    exec {uninstall_fd}<&-
+    exec {conf_fd}<&-
+    [[ $NX_ACME_UNINSTALL_MODE == offline ]] || nx_uninstall_reload_original
+  )
+  nx_uninstall_restore() {
+    local failed=0
+    for i in "${!paths[@]}"; do
+      path="${paths[$i]}"
+      if [[ "$path" == "$CONF_DIR" ]]; then
+        # Preserve the locked directory inode.
+        ${SUDO} find "$CONF_DIR" -mindepth 1 -maxdepth 1 -exec rm -rf -- {} + || failed=1
+        ${SUDO} cp -a "$backup/$i/." "$CONF_DIR/" || failed=1
+      else
+        ${SUDO} rm -rf -- "$path" || failed=1
+        if [[ -e "$backup/$i" || -L "$backup/$i" ]]; then
+          ${SUDO} cp -a -- "$backup/$i" "$path" || failed=1
+        fi
+      fi
+    done
+    "${root_cron[@]}" - < "$backup/root-cron" || failed=1
+    nx_acme_account_crontab - < "$backup/account-cron" || failed=1
+    if [[ -n "$owned" ]]; then reload_nginx_safe || failed=1; fi
+    if (( failed )); then error "ACME 卸载恢复未完成；备份保留：$backup"
+    else ${SUDO} rm -rf "$backup"; fi
+    return 1
+  }
+  trap 'trap "" HUP INT TERM; nx_uninstall_restore; exit 1' HUP INT TERM
+  disable_acme_cron || rc=1
+  while IFS= read -r domain; do
+    [[ -n "$domain" ]] || continue
+    (( ! rc )) || break
+    if [[ -x "$HOME/.acme.sh/acme.sh" ]]; then
+      local -a ecc=()
+      [[ ! -d "$HOME/.acme.sh/${domain}_ecc" ]] || ecc=(--ecc)
+      "$HOME/.acme.sh/acme.sh" --remove -d "$domain" "${ecc[@]}" || { rc=1; break; }
+    fi
+    ${SUDO} rm -rf -- "$SSL_DIR/$domain" || rc=1
+  done <<< "$owned"
+  if (( ! rc )); then
+    ${SUDO} rm -f -- "$NX_ACME_DISPATCH" "$NX_ACME_MANIFEST" || rc=1
+    rm -rf -- "$HOME/.acme.sh" || rc=1
+    rm -f -- "$EMAIL_CONF" "$DNS_CONF" || rc=1
+  fi
+  # No access/map regeneration is needed: only owned HTTP-01 routes change.
+  if (( ! rc )); then
+    if [[ -n "$owned" ]]; then nx_acme_sync_routes || rc=1; fi
+    # Empty accounts have no certificate bytes to validate; this also permits
+    # cleanup of an unused ACME install on a host without nginx.
+    if [[ -n "$owned" ]] && (( ! rc )); then reload_nginx_safe || rc=1; fi
+  fi
+  trap '' HUP INT TERM
+  if (( rc )); then nx_uninstall_restore; return 1; fi
+  ${SUDO} rm -rf "$backup"
+)

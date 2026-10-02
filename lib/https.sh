@@ -5,11 +5,15 @@
 
 nx_https_transform() {
   command -v python3 >/dev/null 2>&1 || { error "保留配置的 HTTPS 操作需要 python3。" >&2; return 1; }
-  NX_HTTPS_CONF_DIR="${CONF_DIR:-}" python3 - "$@" <<'PY'
+  local clean rc=0
+  clean="$(mktemp)" || return 1
+  nx_conf_query strip-access "$2" > "$clean" || { rm -f "$clean"; return 1; }
+  NX_HTTPS_CLEAN_FILE="$clean" NX_HTTPS_CONF_DIR="${CONF_DIR:-}" python3 - "$@" <<'PY' || rc=$?
 import re
 import sys
 import subprocess
 import os
+import ipaddress
 
 operation, filename, domain, ssl_dir, requested, *preserve_sources = sys.argv[1:]
 
@@ -26,8 +30,7 @@ try:
         text = source.read()
     original_text = text
     # Access guards are derived from metadata and regenerated in the transaction.
-    text = re.sub(r"(?m)^\s*# nx-access-begin\n.*?^\s*# nx-access-end\n", "\n", text, flags=re.S | re.M)
-    text = re.sub(r" default_server # nx-access-default\n", "", text)
+    text = open(os.environ['NX_HTTPS_CLEAN_FILE'], encoding='utf-8', newline='').read()
     def parse_text(text):
         # Quotes, comments, escaped characters, and ${variables} cannot alter nesting.
         tokens = []
@@ -133,7 +136,14 @@ try:
         found = directives(node, 'server_name')
         if len(found) != 1:
             fail('expected one explicit server_name directive')
-        return found[0]['args'][1:]
+        result = []
+        for token in found[0]['args'][1:]:
+            if len(token) > 1 and token[0] == token[-1] and token[0] in '\"\'':
+                token = token[1:-1]
+            if any(c in token for c in '\\\"\'') or not re.fullmatch(r'[A-Za-z0-9_.-]+', token):
+                fail('complex/escaped server_name is unsupported')
+            result.append(token)
+        return result
     def listener(node):
         args = node['args'][1:]
         if not args or node['children'] is not None:
@@ -258,7 +268,9 @@ try:
     # Move explicit managed default selections together with application sockets.
     default_sockets = meta('access_default')
     def socket(address, number):
-        return (address.lower() if address and address != '*:' else '0.0.0.0:') + number
+        host = address[:-1].strip('[]') if address else '0.0.0.0'
+        host = str(ipaddress.ip_address('0.0.0.0' if host == '*' else host))
+        return ('[' + host + ']' if ':' in host else host) + ':' + port(number)
     def remap_defaults(old_port, new_port, removing_redirect=False):
         if not default_sockets:
             return
@@ -269,6 +281,8 @@ try:
         # A removed redirect loses its selection unless the application returns
         # to that same socket; the latter can merge two selected defaults.
         for entry in default_sockets.split(','):
+            host, number = entry.rsplit(':', 1)
+            entry = socket(host + ':', number)
             entry = application_sockets.get(entry, entry)
             if removing_redirect and entry in removed_sockets and entry not in remaining_sockets:
                 continue
@@ -412,6 +426,8 @@ except (ValueError, OSError, UnicodeError) as exc:
     print('HTTPS transformation refused: ' + str(exc), file=sys.stderr)
     sys.exit(1)
 PY
+  rm -f "$clean"
+  return "$rc"
 }
 
 nx_https_apply() {

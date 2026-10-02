@@ -363,3 +363,236 @@ nx_template_valid_url() {
   valid_url "$value" && [[ "$value" != *'"'* && "$value" != *'#'* ]] || return 1
   [[ "$value" =~ ^https?://[^/?#:]+(:[0-9]+)?([/?].*)?$ || "$value" =~ ^https?://\[[0-9a-fA-F:]+\](:[0-9]+)?([/?].*)?$ ]]
 }
+
+# Shared structural queries and offset-preserving metadata/access edits.
+nx_conf_query() {
+  python3 - "$@" <<'PYCONF'
+import sys, re, ipaddress, os
+operation, filename, *params = sys.argv[1:]
+def fail(message): raise ValueError(message)
+def socket(value, inspect=False):
+    if value.isdigit(): value = '0.0.0.0:' + value
+    host, number = value.rsplit(':', 1)
+    host = host.strip('[]')
+    try:
+        host = '0.0.0.0' if host == '*' else str(ipaddress.ip_address(host))
+    except ValueError:
+        if not inspect or not re.fullmatch(r'[A-Za-z0-9_-]+(?:\.[A-Za-z0-9_-]+)*\.?', host):
+            fail('unsupported exact listen address: ' + value)
+        host = host.lower().rstrip('.')
+    if not number.isdigit() or not 1 <= int(number) <= 65535: fail('invalid port')
+    return ('[' + host + ']' if ':' in host else host) + ':' + str(int(number))
+def inspect(filename, query=operation):
+    try:
+        text = open(filename, encoding='utf-8', newline='').read()
+        tokens = []
+        metadata = {}
+        comments = []
+        depth = 0
+        i = 0
+        while i < len(text):
+            if text[i].isspace():
+                i += 1
+                continue
+            if text[i] == '#':
+                end = text.find('\n', i)
+                end = len(text) if end < 0 else end + 1
+                line_start = text.rfind('\n', 0, i) + 1
+                comments.append((line_start, i, end, depth))
+                # Setters append metadata after server blocks. Only standalone
+                # top-level comments count, never strings or comments in a block.
+                if depth == 0 and not text[line_start:i].strip():
+                    match = re.fullmatch(r'# ([A-Za-z_][A-Za-z_0-9]*)=([^\r\n]*)(?:\r?\n)?', text[i:end])
+                    if match:
+                        metadata.setdefault(match[1], []).append((line_start, end, match[2]))
+                i = end
+                continue
+            start = i
+            if text[i] in '{};':
+                if text[i] == '{':
+                    depth += 1
+                elif text[i] == '}':
+                    depth -= 1
+                i += 1
+            else:
+                quote = None
+                while i < len(text):
+                    c = text[i]
+                    if c == '\\':
+                        i += 2
+                        continue
+                    if quote:
+                        if c == quote:
+                            quote = None
+                        i += 1
+                        continue
+                    if c in '\"\'':
+                        quote = c
+                        i += 1
+                        continue
+                    if text.startswith('${', i):
+                        end = text.find('}', i + 2)
+                        if end < 0:
+                            fail('unterminated variable')
+                        i = end + 1
+                        continue
+                    if c.isspace() or c in '{};#':
+                        break
+                    i += 1
+                if quote or i > len(text):
+                    fail('unterminated quote/escape')
+            tokens.append((text[start:i], start, i))
+
+        cursor = 0
+        def parse(nested=False):
+            nonlocal cursor
+            nodes = []
+            while cursor < len(tokens):
+                if tokens[cursor][0] == '}':
+                    if not nested:
+                        fail('unexpected closing brace')
+                    closing = tokens[cursor][2]
+                    cursor += 1
+                    return nodes, closing
+                args = []
+                start = tokens[cursor][1]
+                while cursor < len(tokens) and tokens[cursor][0] not in '{};':
+                    args.append(tokens[cursor][0])
+                    cursor += 1
+                if not args or cursor >= len(tokens):
+                    fail('incomplete directive')
+                delimiter, opening, end = tokens[cursor]
+                cursor += 1
+                children = None
+                if delimiter == '{':
+                    children, end = parse(True)
+                elif delimiter != ';':
+                    fail('missing semicolon')
+                nodes.append(dict(args=args, start=start, end=end, opening=opening, children=children))
+            if nested:
+                fail('unclosed block')
+            return nodes, len(text)
+
+        nodes, _ = parse()
+        if query in ('metadata-set', 'metadata-drop', 'strip-access'):
+            edits = []
+            if query == 'strip-access':
+                begin = None
+                for line, start, end, level in comments:
+                    marker = text[start:end].rstrip('\r\n')
+                    standalone = not text[line:start].strip()
+                    if standalone and level == 1 and marker == '# nx-access-begin':
+                        if begin is not None: fail('nested access marker')
+                        begin = line - 1 if line and text[line-1] == '\n' else line
+                    elif standalone and level == 1 and marker == '# nx-access-end':
+                        if begin is None: fail('orphan access marker')
+                        edits.append((begin, end, ''))
+                        begin = None
+                    elif marker == '# nx-access-default' and level == 1:
+                        prefix = text[line:start]
+                        if prefix.endswith(' default_server '):
+                            edits.append((start-len(' default_server '), end, ''))
+                if begin is not None: fail('unterminated access marker')
+            else:
+                keys = params if query == 'metadata-drop' else params[:1]
+                for key in keys:
+                    if not re.fullmatch(r'[A-Za-z_][A-Za-z_0-9]*', key): fail('invalid metadata key')
+                    edits.extend((start, end, '') for start, end, _ in metadata.get(key, []))
+                if query == 'metadata-set':
+                    if len(params) != 2 or any(c in params[1] for c in '\r\n'): fail('invalid metadata value')
+                    edits.append((len(text), len(text), ('\n' if text and not text.endswith('\n') else '') + '# ' + params[0] + '=' + params[1] + '\n'))
+            for start, end, value in sorted(edits, reverse=True):
+                text = text[:start] + value + text[end:]
+            sys.stdout.write(text)
+            return
+        if query == "tree": return nodes
+        def walk(nodes):
+            for n in nodes:
+                yield n
+                yield from walk(n['children'] or [])
+        servers = [n for n in nodes if n['args'] == ['server'] and n['children'] is not None]
+        def directives(n, key): return [x for x in n['children'] if x['args'][0] == key]
+        def unquote(s): return s[1:-1] if len(s)>1 and s[0] == s[-1] and s[0] in '\"\'' else s
+        rows = []
+        # Metadata and structural queries do not need resolvable listen sockets.
+        # Inspection retains hostnames; defaults/security operations require IPs.
+        if query in ('keys', 'summary', 'list', 'traffic'):
+            for idx, srv in enumerate(servers):
+                names = [unquote(x) for n in directives(srv, 'server_name') for x in n['args'][1:]]
+                for n in directives(srv, 'listen'):
+                    args = [unquote(x) for x in n['args'][1:]]
+                    rows.append((idx, socket(args[0], inspect=True), 'ssl' in args[1:], names))
+        if query == 'tls-check':
+            inherited = []
+            if params and os.path.isfile(params[0]):
+                main = inspect(params[0], 'tree')
+                inherited = [child for n in main if n['args'] == ['http'] for child in (n['children'] or [])]
+            for srv in servers:
+                if not any('ssl' in n['args'][2:] for n in directives(srv, 'listen')): continue
+                scope = srv['children'] + inherited
+                # Includes can supply certificates; nginx -t resolves them.
+                if any(n['args'][0] == 'include' or n['args'] == ['ssl_reject_handshake', 'on'] for n in scope): continue
+                for key in ('ssl_certificate', 'ssl_certificate_key'):
+                    if not any(n['args'][0] == key and len(n['args']) == 2 for n in scope): fail('TLS server missing ' + key)
+        elif query == 'list':
+            row = next((r for r in rows if r[2]), rows[0] if rows else None)
+            names = row[3] if row else []
+            values = metadata.get('access_policy', [])
+            policy = values[0][2] if len(values)==1 else ('invalid' if values else 'inherit')
+            fields = [filename, names[0] if names else '未知域名',
+                      ','.join(sorted({r[1] for r in rows})) or '未知监听',
+                      'HTTPS' if any(r[2] for r in rows) else 'HTTP', policy]
+            if any(any(c in field for c in '\t\r\n') for field in fields): fail('unsupported list field')
+            print('\t'.join(fields))
+        elif query == 'meta':
+            values = metadata.get(params[0], [])
+            if len(values)>1: fail('duplicate metadata: '+params[0])
+            print(values[0][2] if values else '')
+        elif query == 'count': print(len(servers))
+        elif query == 'locations': print(sum(n['args'][0]=='location' for n in walk(nodes)))
+        elif query == 'proxy':
+            print(next((unquote(n['args'][1]) for n in walk(nodes) if n['args'][0]=='proxy_pass'), ''))
+        elif query == 'traffic':
+            base = os.path.basename(filename)
+            names = [name for _, _, _, aliases in rows for name in aliases]
+            if any(any(c in field for c in '|\r\n') for field in [filename] + names):
+                fail('unsupported traffic field')
+            print('SITE|' + base)
+            for name, port in sorted({(name.lower().rstrip('.'), sock.rsplit(':', 1)[1]) for _, sock, _, aliases in rows for name in aliases}):
+                print('KEY|' + base + '|' + name + '|' + port)
+        elif query == 'keys':
+            print('\n'.join(sorted({name.lower().rstrip('.')+'|'+sock for _,sock,_,names in rows for name in names})))
+        elif query == 'summary':
+            if not rows: fail('no explicit listeners')
+            row = next((r for r in rows if r[2]), rows[0])
+            if not row[3]: fail('no server_name')
+            domain=row[3][0]
+            if not re.fullmatch(r'[A-Za-z0-9_.-]+',domain) or domain in ('_', 'localhost'): fail('unsupported primary server_name')
+            backend=next((unquote(n['args'][1]) for n in walk(servers[row[0]]['children']) if n['args'][0]=='proxy_pass'), '')
+            if any(c in backend for c in '|\n\r'): fail('unsupported proxy_pass')
+            mode='external' if backend and not re.match(r'https?://(?:127\.0\.0\.1|localhost)(?=[:/]|$)',backend) else ''
+            print('|'.join([domain,row[1].rsplit(':',1)[1],backend,str(row[2]).lower(),mode]))
+        elif query == 'defaults':
+            old = params[0].split(',') if params[0] else []
+            oldrows = params[1].splitlines()
+            newrows = params[2].splitlines()
+            def listeners(lines):
+                return [(p[1],p[2],p[0]) for p in (line.split('|') for line in lines) if len(p)>2]
+            before, after = listeners(oldrows), listeners(newrows)
+            mapping={}
+            for a,b in zip(before,after):
+                if a[1:]==b[1:]: mapping[a[0]]=b[0]
+            result=[]
+            for s in old:
+                s=socket(s); s=mapping.get(s,s)
+                if s in {r[0] for r in after} and s not in result: result.append(s)
+            print(','.join(result))
+        else: fail('unknown query')
+    except (ValueError, OSError, UnicodeError, IndexError) as exc:
+        print('Config inspection refused: '+str(exc), file=sys.stderr)
+        sys.exit(1)
+
+for filename in ([filename] + params if operation in ('list', 'traffic') else [filename]):
+    inspect(filename)
+PYCONF
+}

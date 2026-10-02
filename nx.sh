@@ -29,6 +29,8 @@ NX_RUNNING_SOURCE="$(readlink -f "${BASH_SOURCE[0]}")"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 STATE_DIR="${STATE_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/nginxx}"
 EMAIL_CONF="${STATE_DIR}/email.conf"
+# Read by the eagerly sourced certificate module and installed bundle.
+# shellcheck disable=SC2034
 DNS_CONF="${STATE_DIR}/dns.conf"
 DOMAIN_ONLY_STATE="${DOMAIN_ONLY_STATE:-$CONF_DIR/.nx-access-state}"
 REPO_URL="https://github.com/Xiuyixx/Nginx-X.git"
@@ -908,205 +910,8 @@ conf_target_path() {
   echo "${CONF_DIR}/${domain}-${listen_port}.conf"
 }
 
-# Shared source-offset parser, embedded so the single-file bundle stays standalone.
-nx_conf_query() {
-  python3 - "$@" <<'PYCONF'
-import sys, re, ipaddress, os
-operation, filename, *params = sys.argv[1:]
-def fail(message): raise ValueError(message)
-def socket(value, inspect=False):
-    if value.isdigit(): value = '0.0.0.0:' + value
-    host, number = value.rsplit(':', 1)
-    host = host.strip('[]')
-    try:
-        host = '0.0.0.0' if host == '*' else str(ipaddress.ip_address(host))
-    except ValueError:
-        if not inspect or not re.fullmatch(r'[A-Za-z0-9_-]+(?:\.[A-Za-z0-9_-]+)*\.?', host):
-            fail('unsupported exact listen address: ' + value)
-        host = host.lower().rstrip('.')
-    if not number.isdigit() or not 1 <= int(number) <= 65535: fail('invalid port')
-    return ('[' + host + ']' if ':' in host else host) + ':' + str(int(number))
-def inspect(filename, query=operation):
-    try:
-        text = open(filename, encoding='utf-8').read()
-        tokens = []
-        metadata = {}
-        depth = 0
-        i = 0
-        while i < len(text):
-            if text[i].isspace():
-                i += 1
-                continue
-            if text[i] == '#':
-                end = text.find('\n', i)
-                end = len(text) if end < 0 else end + 1
-                line_start = text.rfind('\n', 0, i) + 1
-                # Setters append metadata after server blocks. Only standalone
-                # top-level comments count, never strings or comments in a block.
-                if depth == 0 and not text[line_start:i].strip():
-                    match = re.fullmatch(r'# ([A-Za-z_][A-Za-z_0-9]*)=([^\r\n]*)(?:\r?\n)?', text[i:end])
-                    if match:
-                        metadata.setdefault(match[1], []).append((line_start, end, match[2]))
-                i = end
-                continue
-            start = i
-            if text[i] in '{};':
-                if text[i] == '{':
-                    depth += 1
-                elif text[i] == '}':
-                    depth -= 1
-                i += 1
-            else:
-                quote = None
-                while i < len(text):
-                    c = text[i]
-                    if c == '\\':
-                        i += 2
-                        continue
-                    if quote:
-                        if c == quote:
-                            quote = None
-                        i += 1
-                        continue
-                    if c in '\"\'':
-                        quote = c
-                        i += 1
-                        continue
-                    if text.startswith('${', i):
-                        end = text.find('}', i + 2)
-                        if end < 0:
-                            fail('unterminated variable')
-                        i = end + 1
-                        continue
-                    if c.isspace() or c in '{};#':
-                        break
-                    i += 1
-                if quote or i > len(text):
-                    fail('unterminated quote/escape')
-            tokens.append((text[start:i], start, i))
+# Structural query helpers are loaded eagerly from lib/templates.sh.
 
-        cursor = 0
-        def parse(nested=False):
-            nonlocal cursor
-            nodes = []
-            while cursor < len(tokens):
-                if tokens[cursor][0] == '}':
-                    if not nested:
-                        fail('unexpected closing brace')
-                    closing = tokens[cursor][2]
-                    cursor += 1
-                    return nodes, closing
-                args = []
-                start = tokens[cursor][1]
-                while cursor < len(tokens) and tokens[cursor][0] not in '{};':
-                    args.append(tokens[cursor][0])
-                    cursor += 1
-                if not args or cursor >= len(tokens):
-                    fail('incomplete directive')
-                delimiter, opening, end = tokens[cursor]
-                cursor += 1
-                children = None
-                if delimiter == '{':
-                    children, end = parse(True)
-                elif delimiter != ';':
-                    fail('missing semicolon')
-                nodes.append(dict(args=args, start=start, end=end, opening=opening, children=children))
-            if nested:
-                fail('unclosed block')
-            return nodes, len(text)
-
-        nodes, _ = parse()
-        if query == "tree": return nodes
-        def walk(nodes):
-            for n in nodes:
-                yield n
-                yield from walk(n['children'] or [])
-        servers = [n for n in nodes if n['args'] == ['server'] and n['children'] is not None]
-        def directives(n, key): return [x for x in n['children'] if x['args'][0] == key]
-        def unquote(s): return s[1:-1] if len(s)>1 and s[0] == s[-1] and s[0] in '\"\'' else s
-        rows = []
-        # Metadata and structural queries do not need resolvable listen sockets.
-        # Inspection retains hostnames; defaults/security operations require IPs.
-        if query in ('keys', 'summary', 'list', 'traffic'):
-            for idx, srv in enumerate(servers):
-                names = [unquote(x) for n in directives(srv, 'server_name') for x in n['args'][1:]]
-                for n in directives(srv, 'listen'):
-                    args = [unquote(x) for x in n['args'][1:]]
-                    rows.append((idx, socket(args[0], inspect=True), 'ssl' in args[1:], names))
-        if query == 'tls-check':
-            inherited = []
-            if params and os.path.isfile(params[0]):
-                main = inspect(params[0], 'tree')
-                inherited = [child for n in main if n['args'] == ['http'] for child in (n['children'] or [])]
-            for srv in servers:
-                if not any('ssl' in n['args'][2:] for n in directives(srv, 'listen')): continue
-                scope = srv['children'] + inherited
-                # Includes can supply certificates; nginx -t resolves them.
-                if any(n['args'][0] == 'include' or n['args'] == ['ssl_reject_handshake', 'on'] for n in scope): continue
-                for key in ('ssl_certificate', 'ssl_certificate_key'):
-                    if not any(n['args'][0] == key and len(n['args']) == 2 for n in scope): fail('TLS server missing ' + key)
-        elif query == 'list':
-            row = next((r for r in rows if r[2]), rows[0] if rows else None)
-            names = row[3] if row else []
-            values = metadata.get('access_policy', [])
-            policy = values[0][2] if len(values)==1 else ('invalid' if values else 'inherit')
-            fields = [filename, names[0] if names else '未知域名',
-                      ','.join(sorted({r[1] for r in rows})) or '未知监听',
-                      'HTTPS' if any(r[2] for r in rows) else 'HTTP', policy]
-            if any(any(c in field for c in '\t\r\n') for field in fields): fail('unsupported list field')
-            print('\t'.join(fields))
-        elif query == 'meta':
-            values = metadata.get(params[0], [])
-            if len(values)>1: fail('duplicate metadata: '+params[0])
-            print(values[0][2] if values else '')
-        elif query == 'count': print(len(servers))
-        elif query == 'locations': print(sum(n['args'][0]=='location' for n in walk(nodes)))
-        elif query == 'proxy':
-            print(next((unquote(n['args'][1]) for n in walk(nodes) if n['args'][0]=='proxy_pass'), ''))
-        elif query == 'traffic':
-            base = os.path.basename(filename)
-            names = [name for _, _, _, aliases in rows for name in aliases]
-            if any(any(c in field for c in '|\r\n') for field in [filename] + names):
-                fail('unsupported traffic field')
-            print('SITE|' + base)
-            for name, port in sorted({(name.lower().rstrip('.'), sock.rsplit(':', 1)[1]) for _, sock, _, aliases in rows for name in aliases}):
-                print('KEY|' + base + '|' + name + '|' + port)
-        elif query == 'keys':
-            print('\n'.join(sorted({name.lower().rstrip('.')+'|'+sock for _,sock,_,names in rows for name in names})))
-        elif query == 'summary':
-            if not rows: fail('no explicit listeners')
-            row = next((r for r in rows if r[2]), rows[0])
-            if not row[3]: fail('no server_name')
-            domain=row[3][0]
-            if not re.fullmatch(r'[A-Za-z0-9_.-]+',domain) or domain in ('_', 'localhost'): fail('unsupported primary server_name')
-            backend=next((unquote(n['args'][1]) for n in walk(servers[row[0]]['children']) if n['args'][0]=='proxy_pass'), '')
-            if any(c in backend for c in '|\n\r'): fail('unsupported proxy_pass')
-            mode='external' if backend and not re.match(r'https?://(?:127\.0\.0\.1|localhost)(?=[:/]|$)',backend) else ''
-            print('|'.join([domain,row[1].rsplit(':',1)[1],backend,str(row[2]).lower(),mode]))
-        elif query == 'defaults':
-            old = params[0].split(',') if params[0] else []
-            oldrows = params[1].splitlines()
-            newrows = params[2].splitlines()
-            def listeners(lines):
-                return [(p[1],p[2],p[0]) for p in (line.split('|') for line in lines) if len(p)>2]
-            before, after = listeners(oldrows), listeners(newrows)
-            mapping={}
-            for a,b in zip(before,after):
-                if a[1:]==b[1:]: mapping[a[0]]=b[0]
-            result=[]
-            for s in old:
-                s=socket(s); s=mapping.get(s,s)
-                if s in {r[0] for r in after} and s not in result: result.append(s)
-            print(','.join(result))
-        else: fail('unknown query')
-    except (ValueError, OSError, UnicodeError, IndexError) as exc:
-        print('Config inspection refused: '+str(exc), file=sys.stderr)
-        sys.exit(1)
-
-for filename in ([filename] + params if operation in ('list', 'traffic') else [filename]):
-    inspect(filename)
-PYCONF
-}
 
 conf_meta_get() { nx_conf_query meta "$1" "$2"; }
 extract_proxy_pass() { nx_conf_query proxy "$1"; }
@@ -1437,10 +1242,10 @@ add_reverse_proxy() {
   fi
 
   target="$(conf_target_path "$domain" "$desired_port")"
-  tmp="$(mktemp /tmp/nginxx-"${domain}"-XXXXXX)"
+  tmp="$(mktemp /tmp/nginxx-"${domain}"-XXXXXX)" || return 1
   trap 'rm -f "${tmp:-}"' RETURN
 
-  build_proxy_conf "$domain" "$create_port" "$backend_port" "$tmp"
+  build_proxy_conf "$domain" "$create_port" "$backend_port" "$tmp" || { rm -f "$tmp"; return 1; }
   if nx_transaction nx_add_conf "$tmp" "$target"; then
     info "反向代理配置已生效：${target}"
 
@@ -1576,10 +1381,10 @@ add_external_url_proxy() {
   fi
 
   target="$(conf_target_path "$domain" "$desired_port")"
-  tmp="$(mktemp /tmp/nginxx-external-"${domain}"-XXXXXX)"
+  tmp="$(mktemp /tmp/nginxx-external-"${domain}"-XXXXXX)" || return 1
   trap 'rm -f "${tmp:-}"' RETURN
 
-  build_external_proxy_conf "$domain" "$create_port" "$upstream_url" "$external_mode" "$tmp" "0" "$stream_upstream_url" "$source_site_url" "$referer_url" "$stream_upstream_urls"
+  build_external_proxy_conf "$domain" "$create_port" "$upstream_url" "$external_mode" "$tmp" "0" "$stream_upstream_url" "$source_site_url" "$referer_url" "$stream_upstream_urls" || { rm -f "$tmp"; return 1; }
   if nx_transaction nx_add_conf "$tmp" "$target"; then
     info "外部反代配置已生效：${target}"
 
@@ -2645,7 +2450,7 @@ uninstall_nginx_only() {
   local pkg
   pkg="$(detect_pkg_mgr)"
   warn "将卸载 Nginx 软件包；保留配置、证书和日志供恢复。"
-  confirm "确认继续卸载 Nginx？" || return 0
+  confirm "确认继续卸载 Nginx？" || return "${NX_UNINSTALL_CANCEL_RC:-0}"
   if check_cmd systemctl; then
     ${SUDO} systemctl stop nginx || { error "停止失败，已取消卸载。"; return 1; }
   elif check_cmd rc-service; then
@@ -2668,43 +2473,32 @@ uninstall_nginx_only() {
   info "Nginx 软件包已卸载，配置、证书及日志已保留。"
 }
 
-# Dynamic locals are intentionally consumed by called functions in this subshell.
-# shellcheck disable=SC2030
-uninstall_acme_only() (
-  local uninstall_fd
-  exec {uninstall_fd}<"$SSL_DIR" || return 1
-  flock -x "$uninstall_fd" || return 1
-  # Read by certificate deletion through Bash dynamic scope.
-  # shellcheck disable=SC2034
-  local NX_ACME_LOCK_HELD=1
-  uninstall_acme_locked
-)
+uninstall_acme_only() {
+  uninstall_acme_locked "${1:-online}"
+}
 uninstall_acme_locked() {
-  local owned domain
+  local owned
   owned="$(nx_acme_owned_domains)" || return 1
   warn "将卸载当前账户 acme.sh、邮箱及 DNS 配置；其他账户证书保留。"
   warn "将删除当前账户证书：${owned:-（无）}"
-  warn "仍引用这些证书的站点需先停用；应用失败会恢复证书。"
+  if [[ ${1:-online} == offline ]]; then
+    warn "Nginx 已移除：离线清理不校验/重载；保留配置中的证书引用不会自动修复，重新安装前须处理。"
+  else
+    warn "仍引用这些证书的站点需先停用；应用失败会恢复证书和原续期调度。"
+  fi
   if ! confirm "确认继续卸载 Acme？"; then
     info "已取消。"
-    return 0
+    return "${NX_UNINSTALL_CANCEL_RC:-0}"
   fi
 
   if ! confirm "这是高风险操作，是否再次确认卸载 Acme？"; then
     info "已取消。"
-    return 0
+    return "${NX_UNINSTALL_CANCEL_RC:-0}"
   fi
 
-  # Remove only this account's scheduler before deleting its executable.
-  disable_acme_cron || return 1
-  while IFS= read -r domain; do
-    [[ -n "$domain" ]] || continue
-    nx_delete_certificate "$domain" || return 1
-  done <<< "$owned"
-  nx_acme_privileged_paths
-  ${SUDO} rm -f "$NX_ACME_DISPATCH" "$NX_ACME_MANIFEST" || return 1
-  rm -rf "$HOME/.acme.sh" || return 1
-  rm -f "$EMAIL_CONF" "$DNS_CONF" || return 1
+  # The helper rechecks ownership/references under both locks, snapshots the
+  # entire account and original scheduler, and restores them together on error.
+  nx_acme_uninstall_account "${1:-online}" || return 1
 
   info "Acme 及相关配置已清理完成。"
 }
@@ -2722,8 +2516,26 @@ uninstall_all() {
     return 0
   fi
 
-  uninstall_nginx_only || return 1
-  uninstall_acme_only || return 1
+  # Only composite orchestration distinguishes cancellation from completion;
+  # standalone menus retain their normal successful-cancel behavior.
+  # shellcheck disable=SC2034
+  local NX_UNINSTALL_CANCEL_RC=2
+  local phase_rc
+  if uninstall_nginx_only; then :; else
+    phase_rc=$?
+    [[ $phase_rc == 2 ]] && return 0
+    return "$phase_rc"
+  fi
+  # Also refuse alternative installations left behind by the package manager.
+  if check_cmd nginx; then
+    error "Nginx 仍已安装，已停止全部卸载；证书与脚本保留。"
+    return 1
+  fi
+  if uninstall_acme_only offline; then :; else
+    phase_rc=$?
+    [[ $phase_rc == 2 ]] && return 0
+    return "$phase_rc"
+  fi
   uninstall_script_only
 }
 
