@@ -123,7 +123,7 @@ health_check_conf_file() {
     case "$address" in 0.0.0.0) address=127.0.0.1 ;; '[::]') address='[::1]' ;; esac
     # A hostname listener cannot establish a verified local address without
     # checking the running socket table; report uncertainty instead.
-    if [[ ! "$address" =~ ^[0-9.]+$ && "$address" != \[*\] ]]; then
+    if [[ ! "$address" =~ ^[0-9.]+$ && "$address" != '['*']' ]]; then
       local_report+="  本机直连 ${socket}: N/A（监听地址不是IP）"$'\n'
       status_ok=2
       continue
