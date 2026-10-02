@@ -2784,7 +2784,7 @@ cert_menu() {
       5) cert_list_menu ;;
       6) run_menu_action enable_https_for_domain; pause ;;
       0) return 0 ;;
-      *) warn "无效输入。请输入 0-5 之间的菜单编号。"; pause ;;
+      *) warn "无效输入。请输入 0-6 之间的菜单编号。"; pause ;;
     esac
   done
 }
@@ -3136,21 +3136,20 @@ uninstall_acme_only() {
     return 0
   fi
 
-  # 1) 删除 acme.sh 安装目录及证书目录
-  rm -rf "$HOME/.acme.sh" 2>/dev/null || true
-  ${SUDO} rm -rf "$SSL_DIR" 2>/dev/null || true
-
-  # 2) 删除 crontab 中 acme 自动续期任务
-  if crontab -l >/tmp/.nginxx_cron 2>/dev/null; then
-    grep -v 'acme.sh --cron' /tmp/.nginxx_cron | crontab - || true
-    rm -f /tmp/.nginxx_cron
+  # Remove only this account's scheduler before deleting its executable.
+  disable_acme_cron || return 1
+  if [[ $EUID -ne 0 ]]; then
+    nx_acme_privileged_paths
+    ${SUDO} rm -f "$NX_ACME_DISPATCH" "$NX_ACME_MANIFEST" || return 1
   fi
-  ${SUDO} rm -f /etc/periodic/monthly/acme-renew 2>/dev/null || true
-
-  # 3) 清理邮箱及 DNS API 持久化信息
-  rm -f "$EMAIL_CONF" 2>/dev/null || true
-  rm -f "$DNS_CONF" 2>/dev/null || true
-  rm -f "$DOMAIN_ONLY_STATE" 2>/dev/null || true
+  rm -rf "$HOME/.acme.sh" || return 1
+  ${SUDO} rm -rf "$SSL_DIR" || return 1
+  rm -f "$EMAIL_CONF" "$DNS_CONF" || return 1
+  if command -v nginx >/dev/null 2>&1; then
+    nx_transaction nx_acme_sync_routes || return 1
+  else
+    nx_acme_sync_routes || return 1
+  fi
 
   info "Acme 及相关配置已清理完成。"
 }

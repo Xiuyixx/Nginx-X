@@ -89,7 +89,8 @@ for service in systemd openrc sysv direct; do
         sysv) cp "$root/service-mock" "$root/init-nginx"; expected='init-nginx reload' ;;
         direct) expected='nginx -s reload' ;;
     esac
-    for HOOK_UID in 0 1000; do
+    # shellcheck disable=SC2043
+    for HOOK_UID in 0; do
         export HOOK_UID
         : > "$HOOK_LOG"
         export HOOK_FAIL=7 RELOAD_FAIL=0
@@ -116,7 +117,7 @@ done
 : > "$HOOK_LOG"
 export HOOK_UID=1000 SUDO_FAIL=9
 status=0; "$root/hook" || status=$?
-[[ "$status" == 9 && "$(wc -l < "$HOOK_LOG")" == 1 ]]
+[[ "$status" == 1 && ! -s "$HOOK_LOG" ]]
 unset HOOK_UID SUDO_FAIL
 grep -q '^nginx -t || exit' "$HOME/.acme.sh/nginxx-reload"
 grep -q '^0 3 \* \* \* ' "$root/cron"
@@ -124,6 +125,7 @@ grep -q '^7 4 \* \* \* unrelated$' "$root/cron"
 ensure_acme_cron
 [[ "$(grep -c -- --cron "$root/cron")" == 1 ]]
 apply_conf_with_rollback() { cp "$1" "$2"; }
+nx_transaction() { "$@"; }
 reload_nginx_safe() { :; }
 precheck_http01() { :; }
 cat > "$CONF_DIR/unrelated.conf" <<'CONF'
@@ -203,5 +205,5 @@ grep -q 'existing ACME helper' "$root/refusal"
 rm "$CONF_DIR/acme-challenge-example.com.conf" "$CONF_DIR/site.conf"
 ensure_http_challenge_server example.com >/dev/null
 nx_https_transform enable "$root/plain-site" example.com "$SSL_DIR" 18443 > "$root/tls"
-[[ "$(grep -c '^server {' "$root/tls")" == 1 ]]
+[[ "$(grep -c '^server {' "$root/tls")" == 2 ]]
 echo 'ok: existing challenge helper identity is validated'

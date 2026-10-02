@@ -366,7 +366,11 @@ try:
         if os.path.exists(helper):
             # Accept only our exact persistent helper shape. A file name alone
             # says nothing about its hostname, listener, or challenge routing.
+            if os.path.islink(helper):
+                fail('existing ACME helper must not be a symlink')
             helper_text = open(helper, encoding='utf-8').read()
+            helper_text = re.sub(r'(?ms)^\s*# nx-access-begin\n.*?^\s*# nx-access-end\n', '', helper_text)
+            helper_text = re.sub(r' default_server # nx-access-default\n', '', helper_text)
             normalized = re.sub(r'\s+', ' ', re.sub(r'(?m)#.*$', '', helper_text)).strip()
             expected = ('server { listen 80; server_name ' + domain + '; '
                         'location ^~ /.well-known/acme-challenge/ { root /usr/share/nginx/html; '
@@ -374,8 +378,7 @@ try:
                         'location / { return 404; } }')
             if normalized != expected:
                 fail('existing ACME helper is not the expected HTTP-01 endpoint; review it before enabling HTTPS')
-        else:
-            edits.append((app['start'], app['start'], block))
+        edits.append((app['start'], app['start'], block))
         update_frontend('https', target)
         remap_defaults(original, target)
         setmeta('https_original_listen_port', original)

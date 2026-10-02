@@ -354,15 +354,7 @@ ${stream_location_block}
 }
 EOF
   fi
-  if [[ "$https_enabled" == "1" && -f "${CONF_DIR}/acme-challenge-${domain}.conf" ]]; then
-    # The persistent certificate-only endpoint already owns this domain on :80.
-    # Generated templates have exactly a redirect followed by an application.
-    local without_redirect
-    without_redirect="$(mktemp)" || return 1
-    awk 'BEGIN {servers=0} /^server \{/ {servers++} servers != 1 {print}' "$out" > "$without_redirect" || { rm -f "$without_redirect"; return 1; }
-    cat "$without_redirect" > "$out" || { rm -f "$without_redirect"; return 1; }
-    rm -f "$without_redirect"
-  fi
+
 }
 
 # URLs are emitted into both quoted and unquoted Nginx arguments.

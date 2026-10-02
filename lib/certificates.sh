@@ -238,16 +238,9 @@ _issue_cert_http() {
   # 原有的 HTTP-01 逻辑
   local domain="$1"
   valid_domain "$domain" || return 1
-  local challenge_conf
+  local challenge_conf="" NX_ACME_PENDING="$domain"
 
-  ensure_acme_location_for_domain_conf "$domain" || return 1
-  challenge_conf="$(ensure_http_challenge_server "$domain")" || return 1
-
-  if ! reload_nginx_safe; then
-    cleanup_http_challenge_server "$challenge_conf"
-    error "证书申请前校验失败：Nginx 配置未生效。"
-    return 1
-  fi
+  nx_transaction nx_acme_prepare_routes "$domain" || return 1
 
   local pre_rc=0
   if precheck_http01 "$domain"; then
@@ -285,6 +278,7 @@ _issue_cert_http() {
   fi
 
   ensure_acme_installed || return 1
+  nx_acme_prepare_webroot || return 1
 
   note "开始为 ${domain} 申请证书（HTTP 验证）..."
   "$HOME/.acme.sh/acme.sh" --set-default-ca --server letsencrypt >/dev/null 2>&1 || true
@@ -338,6 +332,7 @@ ensure_acme_installed() {
   local install_script=""
 
   if [[ -x "$HOME/.acme.sh/acme.sh" ]]; then
+    nx_acme_check_account_identity || return 1
     return 0
   fi
 
@@ -367,6 +362,7 @@ ensure_acme_installed() {
 
 # Standalone persisted hook: works after the interactive shell exits and in bundles.
 nx_install_acme_reload_hook() {
+  nx_acme_check_account_identity || return 1
   local hook="$HOME/.acme.sh/nginxx-reload" tmp
   tmp="$(mktemp)" || return 1
   cat > "$tmp" <<'HOOK'
@@ -374,7 +370,7 @@ nx_install_acme_reload_hook() {
 PATH=/usr/sbin:/usr/bin:/sbin:/bin
 export PATH
 if [ "$(id -u)" != 0 ]; then
-    exec sudo -n "$0"
+    exit 1 # This hook is used only by root-owned ACME accounts.
 fi
 nginx -t || exit $?
 if command -v systemctl >/dev/null 2>&1 && [ -d /run/systemd/system ]; then
@@ -394,27 +390,59 @@ HOOK
 
 nx_deploy_certificate() {
   local domain="$1" hook reloadcmd
+  valid_domain "$domain" || return 1
+  if [[ $EUID -ne 0 ]]; then
+    nx_acme_prepare_dispatch || return 1
+    local stage="$HOME/.acme.sh/nginxx-deploy/$domain"
+    (umask 077; mkdir -p "$stage") || return 1
+    local -a ecc=()
+    [[ ! -d "$HOME/.acme.sh/${domain}_ecc" ]] || ecc=(--ecc)
+    "$HOME/.acme.sh/acme.sh" --install-cert -d "$domain" "${ecc[@]}" \
+      --key-file "$stage/privkey.pem" --fullchain-file "$stage/fullchain.pem" --reloadcmd ':' || return 1
+    local manifest
+    manifest="$(mktemp)" || return 1
+    if ${SUDO} test -e "$NX_ACME_MANIFEST"; then
+      ${SUDO} cat "$NX_ACME_MANIFEST" > "$manifest" || { rm -f "$manifest"; return 1; }
+    fi
+    grep -Fxq "$domain" "$manifest" || printf '%s\n' "$domain" >> "$manifest"
+    ${SUDO} install -o root -g root -m 0600 "$manifest" "$NX_ACME_MANIFEST" || { rm -f "$manifest"; return 1; }
+    rm -f "$manifest"
+    ${SUDO} "$NX_ACME_DISPATCH" deploy
+    return $?
+  fi
   ${SUDO} mkdir -p "${SSL_DIR}/${domain}" || return 1
   hook="$(nx_install_acme_reload_hook)" || return 1
   # POSIX shell quoting, because acme.sh persists and evaluates reloadcmd.
   reloadcmd="'${hook//\'/\'\\\'\'}'"
-  "$HOME/.acme.sh/acme.sh" --install-cert -d "$domain" \
+  [[ ! -f "${SSL_DIR}/${domain}/privkey.pem" ]] || chmod 0600 "${SSL_DIR}/${domain}/privkey.pem" || return 1
+  (umask 077; "$HOME/.acme.sh/acme.sh" --install-cert -d "$domain" \
     --key-file "${SSL_DIR}/${domain}/privkey.pem" \
     --fullchain-file "${SSL_DIR}/${domain}/fullchain.pem" \
-    --reloadcmd "$reloadcmd" || { error "证书部署或重载钩子失败。"; return 1; }
+    --reloadcmd "$reloadcmd") || { error "证书部署或重载钩子失败。"; return 1; }
   [[ -s "${SSL_DIR}/${domain}/privkey.pem" && -s "${SSL_DIR}/${domain}/fullchain.pem" ]] || {
     error "证书部署未生成完整文件。"; return 1;
   }
 }
 
 ensure_acme_cron() {
+  if [[ $EUID -ne 0 ]]; then
+    nx_acme_privileged_paths
+    ${SUDO} test -x "$NX_ACME_DISPATCH" || { error "请先完成证书部署。"; return 1; }
+    nx_acme_privileged_cron enable || return 1
+    # Retire only this owner’s old user scheduler after the root job exists.
+    NX_ACME_USER_CRON_ONLY=1 disable_acme_cron
+    return $?
+  fi
   local current updated periodic="${NX_PERIODIC_DIR:-/etc/periodic}" script
-  current="$(crontab -l 2>/dev/null || true)"
+  current=""
+  if command -v crontab >/dev/null 2>&1; then
+    current="$(nx_acme_read_crontab nx_acme_account_crontab)" || return 1
+  fi
   # Rewrite only renewal commands belonging to this acme home. Keep their
   # arguments, environment and all unrelated cron jobs byte-for-byte.
   updated="$(printf '%s\n' "$current" | nx_acme_cron_filter daily)" || return 1
   if command -v crontab >/dev/null 2>&1; then
-    printf '%s\n' "$updated" | crontab - || return 1
+    printf '%s\n' "$updated" | nx_acme_account_crontab - || return 1
   elif [[ -d "$periodic" ]]; then
     script="$periodic/daily/acme-renew"
     if [[ -e "$script" ]] && ! nx_acme_periodic_owned "$script"; then
@@ -484,8 +512,12 @@ nx_acme_periodic_owned() {
 }
 
 has_acme_cron_task() {
+  if [[ $EUID -ne 0 ]]; then
+    nx_acme_privileged_paths
+    if ${SUDO} crontab -l 2>/dev/null | grep -Fxq "0 3 * * * $NX_ACME_DISPATCH cron"; then return 0; fi
+  fi
   local script
-  if crontab -l 2>/dev/null | nx_acme_cron_filter probe; then return 0; fi
+  if nx_acme_account_crontab -l 2>/dev/null | nx_acme_cron_filter probe; then return 0; fi
   for script in "${NX_PERIODIC_DIR:-/etc/periodic}"/{daily,monthly}/acme-renew; do
     nx_acme_periodic_owned "$script" && return 0
   done
@@ -493,10 +525,16 @@ has_acme_cron_task() {
 }
 
 disable_acme_cron() {
+  if [[ $EUID -ne 0 && ${NX_ACME_USER_CRON_ONLY:-0} != 1 ]]; then
+    nx_acme_privileged_cron remove || return 1
+  fi
   local current script
-  current="$(crontab -l 2>/dev/null || true)"
+  current=""
   if command -v crontab >/dev/null 2>&1; then
-    printf '%s\n' "$current" | nx_acme_cron_filter remove | crontab - || return 1
+    current="$(nx_acme_read_crontab nx_acme_account_crontab)" || return 1
+  fi
+  if command -v crontab >/dev/null 2>&1; then
+    printf '%s\n' "$current" | nx_acme_cron_filter remove | nx_acme_account_crontab - || return 1
   fi
   for script in "${NX_PERIODIC_DIR:-/etc/periodic}"/{daily,monthly}/acme-renew; do
     if nx_acme_periodic_owned "$script"; then
@@ -510,13 +548,32 @@ disable_acme_cron() {
 nx_migrate_certificate_renewal() {
   [[ -x "$HOME/.acme.sh/acme.sh" ]] || return 0
   local conf domain hook reloadcmd marker
-  hook="$(nx_install_acme_reload_hook)" || return 1
-  reloadcmd="'${hook//\'/\'\\\'\'}'"
+  if [[ $EUID -eq 0 ]]; then
+    hook="$(nx_install_acme_reload_hook)" || return 1
+    reloadcmd="'${hook//\'/\'\\\'\'}'"
+  else
+    reloadcmd=:
+  fi
   for conf in "$HOME/.acme.sh"/*/*.conf; do
     [[ -f "$conf" && ! -L "$conf" ]] || continue
     domain="$(basename "$conf" .conf)"
     valid_domain "$domain" || continue
     [[ -s "$SSL_DIR/$domain/fullchain.pem" && -s "$SSL_DIR/$domain/privkey.pem" ]] || continue
+    if python3 - "$conf" <<'PYWEBROOTMIGRATE'
+import sys,shlex
+for line in open(sys.argv[1]):
+    if line.startswith('Le_Webroot='):
+        try:
+            if shlex.split(line.rstrip().split('=',1)[1])==['/usr/share/nginx/html']: sys.exit(0)
+        except ValueError: pass
+sys.exit(1)
+PYWEBROOTMIGRATE
+    then
+      nx_acme_prepare_webroot || return 1
+      if [[ ! -f "$CONF_DIR/.nx-acme-$domain.state" ]]; then
+        nx_transaction nx_acme_prepare_routes "$domain" || return 1
+      fi
+    fi
     # Read data without sourcing acme account files. Only migrate certificates
     # already deployed to this manager’s exact destinations.
     marker="$(python3 - "$conf" "$SSL_DIR/$domain" "$reloadcmd" <<'PYMIGRATE'
@@ -537,6 +594,10 @@ if values.get("Le_RealKeyPath") == sys.argv[2]+"/privkey.pem" and values.get("Le
 PYMIGRATE
 )" || return 1
     [[ "$marker" == migrate ]] || continue
+    if [[ $EUID -ne 0 ]]; then
+      nx_deploy_certificate "$domain" || return 1
+      continue
+    fi
     local -a ecc=()
     [[ "$(dirname "$conf")" != *_ecc ]] || ecc=(--ecc)
     "$HOME/.acme.sh/acme.sh" --install-cert -d "$domain" "${ecc[@]}" \
@@ -603,6 +664,10 @@ ensure_http_challenge_server() {
   local domain="$1"
   local challenge_conf="${CONF_DIR}/acme-challenge-${domain}.conf"
 
+  # This marker is covered by the same directory snapshot as helper/site files.
+  local marker="$CONF_DIR/.nx-acme-$domain.state"
+  ${SUDO} touch "$marker" || return 1
+
   # Exact server_name tokens and structured address-aware listen parsing.
   local existing match
   for existing in "$CONF_DIR"/*.conf; do
@@ -646,7 +711,10 @@ EOF
 
 cleanup_http_challenge_server() {
   local challenge_conf="$1"
-  [[ -z "$challenge_conf" ]] && return 0
+  if [[ -z "$challenge_conf" ]]; then
+    NX_ACME_PENDING='' nx_transaction nx_acme_sync_routes
+    return $?
+  fi
   nx_transaction nx_remove_conf "$challenge_conf"
 }
 
@@ -812,48 +880,7 @@ cert_list_action_menu() {
           return 0
         fi
 
-        local ssl_backup="" acme_backup="" acme_ecc_backup=""
-        ssl_backup="$(mktemp -d /tmp/nginxx-cert-"${domain}"-XXXXXX)"
-        if [[ -d "${SSL_DIR}/${domain}" ]]; then
-          ${SUDO} cp -a "${SSL_DIR}/${domain}" "${ssl_backup}/ssl" 2>/dev/null || true
-        fi
-        if [[ -d "$HOME/.acme.sh/${domain}" ]]; then
-          acme_backup="${ssl_backup}/acme"
-          cp -a "$HOME/.acme.sh/${domain}" "$acme_backup" 2>/dev/null || true
-        fi
-        if [[ -d "$HOME/.acme.sh/${domain}_ecc" ]]; then
-          acme_ecc_backup="${ssl_backup}/acme_ecc"
-          cp -a "$HOME/.acme.sh/${domain}_ecc" "$acme_ecc_backup" 2>/dev/null || true
-        fi
-
-        if [[ -x "$HOME/.acme.sh/acme.sh" ]]; then
-          "$HOME/.acme.sh/acme.sh" --remove -d "$domain" >/dev/null 2>&1 || true
-        fi
-        rm -rf "$HOME/.acme.sh/${domain}" "$HOME/.acme.sh/${domain}_ecc" 2>/dev/null || true
-        ${SUDO} rm -rf "${SSL_DIR}/${domain}" 2>/dev/null || true
-
-        if ! nginx_test; then
-          warn "删除证书后 nginx -t 失败，正在恢复证书文件。"
-          if [[ -d "${ssl_backup}/ssl" ]]; then
-            ${SUDO} mkdir -p "$SSL_DIR"
-            ${SUDO} cp -a "${ssl_backup}/ssl" "${SSL_DIR}/${domain}"
-          fi
-          if [[ -n "$acme_backup" && -d "$acme_backup" ]]; then
-            mkdir -p "$HOME/.acme.sh"
-            cp -a "$acme_backup" "$HOME/.acme.sh/${domain}" 2>/dev/null || true
-          fi
-          if [[ -n "$acme_ecc_backup" && -d "$acme_ecc_backup" ]]; then
-            mkdir -p "$HOME/.acme.sh"
-            cp -a "$acme_ecc_backup" "$HOME/.acme.sh/${domain}_ecc" 2>/dev/null || true
-          fi
-          rm -rf "$ssl_backup" 2>/dev/null || true
-          error "证书删除已回滚。请检查 nginx -t 输出后重试。"
-          ${SUDO} nginx -t || true
-          pause
-          return 1
-        fi
-
-        rm -rf "$ssl_backup" 2>/dev/null || true
+        nx_delete_certificate "$domain" || return 1
         info "证书已删除：${domain}"
         pause
         return 0
@@ -926,3 +953,334 @@ enable_https_for_domain() {
   enable_https_from_config_list
 }
 
+
+# Called after the mutation, inside the configuration transaction, before access
+# rules/test/reload. A retained certificate keeps its port-80 route even when its
+# application is disabled or removed. Renderers always include their redirect;
+# this reconciler removes the now redundant helper atomically.
+nx_acme_sync_routes() {
+  local marker domain helper file match found tmp
+  # Adopt legacy helpers only after checking their complete generated body.
+  for helper in "$CONF_DIR"/acme-challenge-*.conf; do
+    [[ -f "$helper" ]] || continue
+    domain="${helper##*/acme-challenge-}"; domain="${domain%.conf}"
+    valid_domain "$domain" || continue
+    [[ -s "$SSL_DIR/$domain/fullchain.pem" ]] || continue
+    nx_acme_helper_owned "$helper" "$domain" || return 1
+    marker="$CONF_DIR/.nx-acme-$domain.state"
+    [[ -f "$marker" ]] || ${SUDO} touch "$marker" || return 1
+  done
+  for marker in "$CONF_DIR"/.nx-acme-*.state; do
+    [[ -f "$marker" && ! -L "$marker" ]] || continue
+    domain="${marker##*/.nx-acme-}"; domain="${domain%.state}"
+    valid_domain "$domain" || return 1
+    helper="$CONF_DIR/acme-challenge-$domain.conf"
+    if [[ -e "$helper" ]]; then
+      nx_acme_helper_owned "$helper" "$domain" || { error "ACME helper 内容不受管：$helper"; return 1; }
+    fi
+    if [[ ! -s "$SSL_DIR/$domain/fullchain.pem" && "${NX_ACME_PENDING:-}" != "$domain" ]]; then
+      ${SUDO} rm -f "$helper" "$marker" || return 1
+      continue
+    fi
+    found=0
+    for file in "$CONF_DIR"/*.conf; do
+      [[ -f "$file" && "$file" != "$helper" ]] || continue
+      match="$(nx_https_transform challenge-probe "$file" "$domain" "$SSL_DIR" '')" || return 1
+      if [[ "$match" == yes ]]; then
+        tmp="$(mktemp)" || return 1
+        nx_https_transform challenge "$file" "$domain" "$SSL_DIR" '' > "$tmp" || { rm -f "$tmp"; return 1; }
+        if ! cmp -s "$tmp" "$file"; then
+          ${SUDO} tee "$file" < "$tmp" >/dev/null || { rm -f "$tmp"; return 1; }
+        fi
+        rm -f "$tmp"
+        found=1
+      fi
+    done
+    if (( found )); then
+      ${SUDO} rm -f "$helper" || return 1
+    elif [[ ! -f "$helper" ]]; then
+      tmp="$(mktemp)" || return 1
+      nx_acme_render_helper "$domain" > "$tmp"
+      install_managed_file "$tmp" "$helper" || { rm -f "$tmp"; return 1; }
+      rm -f "$tmp"
+    fi
+  done
+}
+
+nx_acme_render_helper() {
+  cat <<EOFHELPER
+server {
+    listen 80;
+    server_name $1;
+    location ^~ /.well-known/acme-challenge/ {
+        root /usr/share/nginx/html;
+        default_type "text/plain";
+        try_files \$uri =404;
+    }
+    location / { return 404; }
+}
+EOFHELPER
+}
+
+nx_acme_helper_owned() {
+  [[ -f "$1" && ! -L "$1" ]] || return 1
+  python3 - "$1" "$2" <<'PYHELPER'
+import re,sys
+text=open(sys.argv[1]).read()
+text=re.sub(r'(?ms)^\s*# nx-access-begin\n.*?^\s*# nx-access-end\n','',text)
+text=re.sub(r' default_server # nx-access-default\n','',text)
+text=re.sub(r'(?m)#.*$','',text)
+expected='server { listen 80; server_name '+sys.argv[2]+'; location ^~ /.well-known/acme-challenge/ { root /usr/share/nginx/html; default_type "text/plain"; try_files $uri =404; } location / { return 404; } }'
+sys.exit(0 if re.sub(r'\s+',' ',text).strip()==expected else 1)
+PYHELPER
+}
+
+# The privileged scheduler NEVER sources account files or executes the user's
+# ACME/hook as root. ACME stays in its original account, including DNS secrets.
+# Only this generated, root-owned dispatcher and manifest run privileged.
+nx_acme_privileged_paths() {
+  NX_ACME_DISPATCH="/usr/local/libexec/nginxx-acme-$(id -u)"
+  NX_ACME_MANIFEST="/var/lib/nginxx/acme-$(id -u).domains"
+}
+
+nx_acme_prepare_dispatch() {
+  nx_acme_privileged_paths
+  local tmp user
+  user="$(id -un)" || return 1
+  tmp="$(mktemp)" || return 1
+  {
+    printf '#!/bin/bash\nset -euo pipefail\nPATH=/usr/sbin:/usr/bin:/sbin:/bin\nexport PATH\n'
+    printf 'account=%q\naccount_home=%q\nssl=%q\nmanifest=%q\n' "$user" "$HOME" "$SSL_DIR" "$NX_ACME_MANIFEST"
+    cat <<'DISPATCH'
+[[ $EUID == 0 ]] || exit 1
+as_account() { su -s /bin/sh "$account" -c "$1"; }
+quote() { printf "'%s'" "${1//\'/\'\\\'\'}"; }
+if [[ ${1:-} == cron ]]; then
+  as_account "HOME=$(quote "$account_home") $(quote "$account_home/.acme.sh/acme.sh") --cron --home $(quote "$account_home/.acme.sh")" || exit $?
+fi
+[[ -f "$manifest" && ! -L "$manifest" ]] || exit 1
+while IFS= read -r domain; do
+  [[ $domain =~ ^[a-zA-Z0-9][a-zA-Z0-9.-]*$ && $domain != *..* ]] || exit 1
+  destination="$ssl/$domain"
+  [[ ! -L "$ssl" && ! -L "$destination" ]] || exit 1
+  install -d -m 0755 "$destination"
+  stage="$(mktemp -d "$destination/.deploy-XXXXXX")"
+  # Read as the owner: symlinks cannot trick root into exposing root-only files.
+  for name in privkey.pem fullchain.pem; do
+    if ! as_account "cat $(quote "$account_home/.acme.sh/nginxx-deploy/$domain/$name")" > "$stage/$name"; then
+      rm -rf "$stage"; exit 1
+    fi
+    [[ -s "$stage/$name" ]] || { rm -rf "$stage"; exit 1; }
+  done
+  chmod 0600 "$stage/privkey.pem"
+  chmod 0644 "$stage/fullchain.pem"
+  mv -f "$stage/privkey.pem" "$destination/privkey.pem"
+  mv -f "$stage/fullchain.pem" "$destination/fullchain.pem"
+  rmdir "$stage"
+done < "$manifest"
+nginx -t
+if command -v systemctl >/dev/null && [[ -d /run/systemd/system ]]; then
+  systemctl reload nginx
+elif command -v rc-service >/dev/null; then
+  rc-service nginx reload
+elif [[ -x /etc/init.d/nginx ]]; then
+  /etc/init.d/nginx reload
+else
+  nginx -s reload
+fi
+DISPATCH
+  } > "$tmp"
+  ${SUDO} install -d -m 0755 /usr/local/libexec /var/lib/nginxx "$SSL_DIR" || { rm -f "$tmp"; return 1; }
+  # Every privileged destination ancestor must resist the ACME account's writes.
+  if ! ${SUDO} python3 - /usr/local/libexec /var/lib/nginxx "$SSL_DIR" <<'PYTRUST'
+import os,sys,stat
+for path in sys.argv[1:]:
+    path=os.path.abspath(path)
+    while True:
+        st=os.lstat(path)
+        if stat.S_ISLNK(st.st_mode) or st.st_uid != 0 or st.st_mode & 0o022:
+            sys.exit('unsafe privileged ACME destination: '+path)
+        if path=='/': break
+        path=os.path.dirname(path)
+PYTRUST
+  then rm -f "$tmp"; return 1; fi
+  ${SUDO} install -o root -g root -m 0700 "$tmp" "$NX_ACME_DISPATCH" || { rm -f "$tmp"; return 1; }
+  rm -f "$tmp"
+}
+
+nx_acme_privileged_cron() {
+  local mode="$1" current updated
+  nx_acme_privileged_paths
+  command -v crontab >/dev/null 2>&1 || { error "非 root ACME 续期需要 crontab。"; return 1; }
+  local -a scheduler=(crontab)
+  [[ -z "$SUDO" ]] || scheduler=("$SUDO" crontab)
+  current="$(nx_acme_read_crontab "${scheduler[@]}")" || return 1
+  updated="$(printf '%s\n' "$current" | python3 -c '
+import sys,shlex
+path,mode=sys.argv[1:]
+for line in sys.stdin.read().splitlines():
+    words=line.split(None,5)
+    try: owned=len(words)==6 and shlex.split(words[5])==[path,"cron"]
+    except ValueError: owned=False
+    if not owned: print(line)
+if mode=="enable": print("0 3 * * * "+shlex.quote(path)+" cron")
+' "$NX_ACME_DISPATCH" "$mode")" || return 1
+  printf '%s\n' "$updated" | ${SUDO} crontab -
+}
+
+nx_acme_prepare_webroot() {
+  [[ $EUID -ne 0 ]] || return 0
+  local path=/usr/share/nginx/html/.well-known/acme-challenge uid
+  uid="$(id -u)"
+  ${SUDO} mkdir -p "$path" || return 1
+  # Only the token directory is delegated, never the site root. Do not seize
+  # another account's challenge directory or follow administrator symlinks.
+  ${SUDO} python3 - "$path" "$uid" <<'PYWEBROOT'
+import os,sys,stat
+path,uid=sys.argv[1],int(sys.argv[2]); st=os.lstat(path)
+if not stat.S_ISDIR(st.st_mode) or st.st_uid not in (0,uid):
+    sys.exit('HTTP-01 webroot belongs to another account; use DNS-01')
+parent=os.path.dirname(path)
+while parent!='/':
+    p=os.lstat(parent)
+    if not stat.S_ISDIR(p.st_mode) or p.st_uid!=0 or p.st_mode & 0o022:
+        sys.exit('unsafe HTTP-01 webroot parent')
+    parent=os.path.dirname(parent)
+if st.st_uid==0:
+    if os.listdir(path): sys.exit('root HTTP-01 webroot is in use; use DNS-01')
+    os.chown(path,uid,-1)
+os.chmod(path,0o755)
+PYWEBROOT
+}
+
+nx_acme_prepare_routes() {
+  local domain="$1"
+  valid_domain "$domain" || return 1
+  ${SUDO} touch "$CONF_DIR/.nx-acme-$domain.state" || return 1
+  nx_acme_sync_routes
+}
+
+nx_acme_forget_deployment() {
+  [[ $EUID -ne 0 ]] || return 0
+  nx_acme_privileged_paths
+  ${SUDO} test -f "$NX_ACME_MANIFEST" || return 0
+  local tmp
+  tmp="$(mktemp)" || return 1
+  ${SUDO} cat "$NX_ACME_MANIFEST" | awk -v domain="$1" '$0 != domain' > "$tmp" || { rm -f "$tmp"; return 1; }
+  ${SUDO} install -o root -g root -m 0600 "$tmp" "$NX_ACME_MANIFEST" || { rm -f "$tmp"; return 1; }
+  rm -f "$tmp"
+}
+
+nx_acme_check_account_identity() {
+  [[ $EUID -eq 0 ]] || return 0
+  python3 - "$HOME" <<'PYIDENTITY'
+import os,sys,stat
+home=sys.argv[1]
+paths=[home,home+'/.acme.sh']
+for base,dirs,files in os.walk(home+'/.acme.sh',followlinks=False):
+    paths.extend(os.path.join(base,n) for n in dirs+files)
+for path in paths:
+    st=os.lstat(path)
+    if st.st_uid!=0 or st.st_mode & 0o022 or stat.S_ISLNK(st.st_mode):
+        sys.exit('Refusing privileged execution of a non-root ACME account: '+path)
+PYIDENTITY
+}
+
+nx_acme_account_crontab() {
+  if [[ $EUID -ne 0 ]]; then
+    ${SUDO} crontab -u "$(id -un)" "$@"
+  else
+    crontab "$@"
+  fi
+}
+
+# Back up all account/deployed material before the first destructive action.
+# Config/helper removal is transactional; restore certificate material as well
+# if removal, validation, or reload fails.
+nx_delete_certificate() {
+  local domain="$1" backup path name rc=0
+  valid_domain "$domain" || return 1
+  [[ ! -x "$HOME/.acme.sh/acme.sh" ]] || nx_acme_check_account_identity || return 1
+  backup="$(mktemp -d /tmp/nginxx-cert-delete-XXXXXX)" || return 1
+  for name in ssl acme ecc staged; do
+    case "$name" in
+      ssl) path="$SSL_DIR/$domain" ;;
+      acme) path="$HOME/.acme.sh/$domain" ;;
+      ecc) path="$HOME/.acme.sh/${domain}_ecc" ;;
+      staged) path="$HOME/.acme.sh/nginxx-deploy/$domain" ;;
+    esac
+    if [[ -e "$path" ]]; then
+      ${SUDO} cp -a "$path" "$backup/$name" || { ${SUDO} rm -rf "$backup"; return 1; }
+    fi
+  done
+  if [[ -x "$HOME/.acme.sh/acme.sh" ]]; then
+    local -a ecc=()
+    [[ ! -d "$HOME/.acme.sh/${domain}_ecc" ]] || ecc=(--ecc)
+    "$HOME/.acme.sh/acme.sh" --remove -d "$domain" "${ecc[@]}" || rc=1
+  fi
+  if (( ! rc )); then
+    rm -rf "$HOME/.acme.sh/$domain" "$HOME/.acme.sh/${domain}_ecc" "$HOME/.acme.sh/nginxx-deploy/$domain" || rc=1
+    ${SUDO} rm -rf "$SSL_DIR/$domain" || rc=1
+  fi
+  if (( ! rc )) && nx_transaction nx_acme_sync_routes; then
+    nx_acme_forget_deployment "$domain" || { error "证书已删除，但部署清单清理失败。"; return 1; }
+    ${SUDO} rm -rf "$backup"
+    return $?
+  fi
+  rc=0
+  for name in ssl acme ecc staged; do
+    case "$name" in
+      ssl) path="$SSL_DIR/$domain" ;;
+      acme) path="$HOME/.acme.sh/$domain" ;;
+      ecc) path="$HOME/.acme.sh/${domain}_ecc" ;;
+      staged) path="$HOME/.acme.sh/nginxx-deploy/$domain" ;;
+    esac
+    if [[ -e "$backup/$name" ]]; then
+      ${SUDO} rm -rf "$path" && ${SUDO} cp -a "$backup/$name" "$path" || rc=1
+    fi
+  done
+  if (( rc )); then
+    error "证书恢复失败；备份保留：$backup"
+  else
+    ${SUDO} rm -rf "$backup"
+    reload_nginx_safe || true
+    error "证书删除失败，已恢复证书材料。"
+  fi
+  return 1
+}
+
+# A missing table is normal; permission/I/O errors must never be mistaken for
+# an empty table followed by destructive replacement.
+nx_acme_read_crontab() {
+  local diagnostic output rc
+  diagnostic="$(mktemp)" || return 1
+  if output="$("$@" -l 2> "$diagnostic")"; then
+    rm -f "$diagnostic"
+    printf '%s\n' "$output"
+    return 0
+  else
+    rc=$?
+  fi
+  if [[ $rc == 1 ]] && { [[ ! -s "$diagnostic" ]] || grep -Eqi 'no crontab|No such file or directory' "$diagnostic"; }; then
+    rm -f "$diagnostic"
+    return 0
+  fi
+  cat "$diagnostic" >&2
+  rm -f "$diagnostic"
+  return "$rc"
+}
+
+# Call inside the transaction BEFORE moving/removing/replacing an active site.
+# Covers legacy certificates even when their ACME account is not the current
+# caller's account. Read only public deployed certificate presence; do not move
+# or source anyone else's ACME account or credentials.
+nx_acme_retain_conf_route() {
+  local file="$1" rows name socket
+  [[ -f "$file" && "$file" == *.conf ]] || return 0
+  rows="$(nx_conf_query keys "$file")" || return 1
+  while IFS='|' read -r name socket; do
+    [[ "$socket" == *:80 && -s "$SSL_DIR/$name/fullchain.pem" ]] || continue
+    valid_domain "$name" || continue
+    ${SUDO} touch "$CONF_DIR/.nx-acme-$name.state" || return 1
+  done <<< "$rows"
+}
