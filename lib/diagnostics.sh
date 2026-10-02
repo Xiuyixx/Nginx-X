@@ -1,5 +1,46 @@
 #!/usr/bin/env bash
 # Read-only probes and monitoring; sourced eagerly and included in installed bundle.
+# Display-only: never pass the redacted value to a network probe. Fail closed
+# on ambiguous URLs, and never echo parser exceptions (which can contain input).
+health_display_url() {
+  local display
+  if display="$(python3 - "$1" 2>/dev/null <<'PYURL'
+import re
+import sys
+from urllib.parse import urlsplit, urlunsplit
+
+try:
+    raw = sys.argv[1]
+    # urlsplit silently removes some controls; reject them before parsing.
+    if any(ord(c) < 33 or 127 <= ord(c) <= 159 for c in raw) or "\\" in raw:
+        raise ValueError()
+    url = urlsplit(raw)
+    if url.scheme.lower() not in ("http", "https") or not url.netloc or not url.hostname:
+        raise ValueError()
+    # Validate ports and percent escapes without decoding userinfo into output.
+    _ = url.port
+    if re.search(r"%(?![0-9a-fA-F]{2})", raw):
+        raise ValueError()
+    authority = url.netloc.rsplit("@", 1)[-1]
+    if "@" in url.netloc:
+        authority = "[redacted]@" + authority
+    # Preserve parameter names/order (including duplicates); redact bare fields
+    # too, because they may themselves be bearer tokens. Handle legacy ';'.
+    query = "&".join((field.split("=", 1)[0] + "=[redacted]")
+                     if "=" in field else "[redacted]"
+                     for field in re.split(r"[&;]", url.query)) if url.query else ""
+    print(urlunsplit((url.scheme, authority, url.path, query,
+                     "[redacted]" if url.fragment else "")))
+except Exception:
+    print("[URL redacted: invalid]")
+PYURL
+)"; then
+    printf '%s' "$display"
+  else
+    printf '%s' '[URL redacted: unavailable]'
+  fi
+}
+
 health_probe_url() {
   local url="$1" resolve="${2:-}" out rc=0
   local -a args=(-sS -o /dev/null --connect-timeout 3 --max-time 8
@@ -125,25 +166,25 @@ health_check_conf_file() {
 
   echo "- $(basename "$conf_file")"
   echo "  域名: ${domain}"
-  echo "  入口: ${target_url}"
+  echo "  入口: $(health_display_url "$target_url")"
   printf '%s\n' "$local_report"
   echo "  公网/CDN 协议: ${scheme^^} | HTTP: ${http_code} | 状态: ${status_label}"
   echo "  DNS: ${dns_ips}"
   [[ -n "$remote_ip" ]] && echo "  命中IP: ${remote_ip}"
-  [[ -n "$effective_url" && "$effective_url" != "$target_url" ]] && echo "  最终跳转: ${effective_url}"
+  [[ -n "$effective_url" && "$effective_url" != "$target_url" ]] && echo "  最终跳转: $(health_display_url "$effective_url")"
   if [[ "$scheme" == "https" ]]; then
     echo "  证书剩余天数: ${tls_days}"
     echo "  公网证书校验: $( [[ "$verify_result" == "0" && "${probe_rc:-0}" == 0 ]] && echo "通过" || echo "未通过/未完成(${verify_result:-N/A})" )"
   fi
   if [[ "$mode" == "external" ]]; then
-    echo "  主上游: ${upstream_url}"
+    echo "  主上游: $(health_display_url "$upstream_url")"
     echo "  主上游状态: ${upstream_status}"
     if [[ ${#stream_urls[@]} -gt 0 ]]; then
-      if [[ ${#stream_urls[@]} -eq 1 ]]; then
-        echo "  推流上游: ${stream_urls[0]}"
-      else
-        echo "  推流上游: ${stream_urls[*]}"
-      fi
+      printf '  推流上游:'
+      for stream_upstream_url in "${stream_urls[@]}"; do
+        printf ' %s' "$(health_display_url "$stream_upstream_url")"
+      done
+      printf '\n'
       echo "  推流上游状态: ${stream_status}"
     fi
   else

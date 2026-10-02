@@ -38,6 +38,59 @@ if grep -q -- ' -k\| -L' "$T/curl"; then exit 1; fi
 if health_probe_label 200 20 0 >/dev/null; then exit 1; fi
 if health_probe_label 200 0 28 >/dev/null; then exit 1; fi
 health_probe_label 200 0 0 >/dev/null
+# Exercise actual health rendering and curl argument construction, in both
+# source and installed bundle. Scan the raw stdout/stderr capture, not a
+# post-processed view that could hide a leaked credential.
+bash tools/build-bundle.sh "$T/bundle"
+for implementation in ./nx.sh "$T/bundle"; do
+  (
+    # shellcheck disable=SC1090 # test source and generated standalone bundle
+    source "$implementation"
+    upstream='https://primaryuser:primarypassword@origin.example/path?token=primarytoken&other=othersecret#primaryfragment'
+    stream_one='https://streamuser:streampassword@stream.example/live?auth=streamtoken'
+    stream_two='https://encodeduser:encoded%70assword@[::1]:9443/live?token=secondtoken&token=duplicatetoken#streamfragment'
+    redirect='https://redirectuser:redirectpassword@redirect.example/end?access_token=redirecttoken#redirectfragment'
+    cat > "$T/external.conf" <<EOF
+# mode=external
+# upstream_url=$upstream
+# stream_upstream_urls=$stream_one|$stream_two
+server { listen 127.0.0.1:18080; server_name public.example; location / { proxy_pass https://origin.example; } }
+EOF
+    curl() {
+      printf '%s\n' "${@: -1}" >> "$T/network-urls"
+      printf '200|127.0.0.1|%s|0' "$redirect"
+      printf 'mock curl diagnostic with secret %s\n' "$upstream" >&2
+    }
+    note() { printf '%s\n' "$*"; }
+    timeout() { return 1; }
+    : > "$T/network-urls"
+    health_check_conf_file "$T/external.conf" > "$T/health-capture" 2>&1
+    grep -Fxq "$upstream" "$T/network-urls"
+    grep -Fxq "$stream_one" "$T/network-urls"
+    grep -Fxq "$stream_two" "$T/network-urls"
+    grep -Fq '最终跳转: https://[redacted]@redirect.example/end?access_token=[redacted]#[redacted]' "$T/health-capture"
+    grep -Fq '主上游: https://[redacted]@origin.example/path?token=[redacted]&other=[redacted]#[redacted]' "$T/health-capture"
+    grep -Fq 'https://[redacted]@[::1]:9443/live?token=[redacted]&token=[redacted]#[redacted]' "$T/health-capture"
+    # Single-stream legacy metadata follows the same display path.
+    sed -i "s|^# stream_upstream_urls=.*|# stream_upstream_url=$stream_one|" "$T/external.conf"
+    health_check_conf_file "$T/external.conf" >> "$T/health-capture" 2>&1
+    for malformed in 'https://user:malformedsecret@[bad/?x=malformedtoken' \
+      'https://user:bad%escape@host/?x=badpercenttoken' \
+      $'https://user:controlsecret@host/\033[31m?x=controltoken' \
+      'https://user:backslashsecret@host\evil/?x=backslashtoken'; do
+      [[ "$(health_display_url "$malformed" 2>> "$T/health-capture")" == '[URL redacted: invalid]' ]]
+      health_display_url "$malformed" >> "$T/health-capture" 2>&1
+    done
+    health_display_url 'https://host/path?baresecret;key=semicolonsecret#fragmentsecret' >> "$T/health-capture" 2>&1
+    if grep -Eq 'primaryuser|primarypassword|primarytoken|othersecret|primaryfragment|streamuser|streampassword|streamtoken|encodeduser|encoded%70assword|secondtoken|duplicatetoken|streamfragment|redirectuser|redirectpassword|redirecttoken|redirectfragment|malformedsecret|malformedtoken|bad%escape|badpercenttoken|controlsecret|controltoken|backslashsecret|backslashtoken|baresecret|semicolonsecret|fragmentsecret' "$T/health-capture"; then
+      echo 'diagnostics leaked a URL secret' >&2; exit 1
+    fi
+    if LC_ALL=C grep -q $'\033' "$T/health-capture"; then exit 1; fi
+    # Parser unavailability also fails closed without printing the URL.
+    python3() { return 127; }
+    [[ "$(health_display_url "$upstream")" == '[URL redacted: unavailable]' ]]
+  )
+done
 health_probe_url() { printf '%s\n' "$*" >> "$T/probes"; echo '200|127.0.0.2||0|0'; }
 timeout() { return 1; }
 getent() { :; }
