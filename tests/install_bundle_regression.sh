@@ -38,7 +38,13 @@ cat > "$root/mock/mv" <<'SH'
 mkdir -p "${@: -1}"
 exec "$NX_REAL_MV" "$@"
 SH
-chmod +x "$root/mock/mv"
+# This fixture owns every path: avoid sudo's secure_path bypassing the mv
+# injection on non-root CI runners. No privileged operation is required.
+cat > "$root/mock/sudo" <<'SH'
+#!/usr/bin/env bash
+exec "$@"
+SH
+chmod +x "$root/mock/mv" "$root/mock/sudo"
 if PATH="$root/mock:$PATH" NX_REAL_MV="$real_mv" TARGET_BIN="$root/bin/raced" bash "$root/race-source/install.sh" --no-run > "$root/race.log" 2>&1; then exit 1; fi
 [[ -d "$root/bin/raced" && -z "$(find "$root/bin/raced" -mindepth 1 -print)" ]]
 [[ -z "$(find "$root/bin" -name 'raced.stage.*' -print)" ]]
