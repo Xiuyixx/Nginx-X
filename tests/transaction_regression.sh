@@ -1,10 +1,12 @@
 #!/usr/bin/env bash
 set -euo pipefail
+# shellcheck source=tests/fixtures/test-environment.sh
+source "$(dirname "${BASH_SOURCE[0]}")/fixtures/test-environment.sh"
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # shellcheck disable=SC1091
 source "$ROOT/nx.sh"
 T="$(mktemp -d)"
-trap 'rm -rf "$T"' EXIT
+trap 'nx_test_cleanup; rm -rf "$T"' EXIT
 CONF_DIR="$T/conf"
 STATE_DIR="$T/state"
 DOMAIN_ONLY_STATE="$STATE_DIR/domain-only.conf"

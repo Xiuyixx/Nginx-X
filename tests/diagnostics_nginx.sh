@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
+# shellcheck source=tests/fixtures/test-environment.sh
+source "$(dirname "${BASH_SOURCE[0]}")/fixtures/test-environment.sh"
 cd "$(dirname "$0")/.."
 # shellcheck disable=SC1091
 source ./nx.sh
@@ -7,9 +9,10 @@ bin="${NGINX_TEST_BIN:-$(command -v nginx)}"
 T="$(mktemp -d)"
 cleanup() {
   if [[ -s "$T/pid" ]]; then "$bin" -p "$T/" -c "$T/nginx.conf" -s quit >/dev/null 2>&1 || true; fi
+  nx_test_wait_pidfile "$T/pid"
   rm -rf "$T"
 }
-trap cleanup EXIT
+trap 'cleanup; nx_test_cleanup' EXIT
 read -r port tlsport < <(python3 - <<'PY'
 import socket
 sockets=[socket.socket(),socket.socket()]

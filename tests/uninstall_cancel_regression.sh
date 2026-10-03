@@ -1,10 +1,12 @@
 #!/usr/bin/env bash
 # shellcheck disable=SC2317
 set -euo pipefail
+# shellcheck source=tests/fixtures/test-environment.sh
+source "$(dirname "${BASH_SOURCE[0]}")/fixtures/test-environment.sh"
 cd "$(dirname "$0")/.."
 source ./nx.sh
 root="$(mktemp -d)"
-trap 'rm -rf "$root"' EXIT
+trap 'nx_test_cleanup; rm -rf "$root"' EXIT
 # All package/service/account operations below are explicit no-op stubs.
 # Exercise real confirmations and composite control flow, not helper stand-ins.
 SUDO=''

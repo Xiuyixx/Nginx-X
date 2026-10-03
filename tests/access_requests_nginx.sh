@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 # Real sockets, HTTP and TLS; never uses the machine's nginx config/service.
 set -euo pipefail
+# shellcheck source=tests/fixtures/test-environment.sh
+source "$(dirname "${BASH_SOURCE[0]}")/fixtures/test-environment.sh"
 REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 NGINX_BIN="${NGINX_BIN:-$(command -v nginx || true)}"
 if [[ -z "$NGINX_BIN" ]]; then
@@ -30,7 +32,7 @@ PY
   fi
   rm -rf "$TEST_ROOT"
 }
-trap cleanup EXIT
+trap 'cleanup; nx_test_cleanup' EXIT
 # nginx workers must be able to traverse the fixture when the suite runs as root.
 chmod 755 "$TEST_ROOT"
 export NX_CONF_DIR="$TEST_ROOT/conf.d" STATE_DIR="$TEST_ROOT/state" SSL_DIR="$TEST_ROOT/ssl"

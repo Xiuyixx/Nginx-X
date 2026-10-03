@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 # Migration and last-site removal regression for the old DOMAIN_ONLY state file.
 set -euo pipefail
+# shellcheck source=tests/fixtures/test-environment.sh
+source "$(dirname "${BASH_SOURCE[0]}")/fixtures/test-environment.sh"
 cd "$(dirname "$0")/.."
 source ./nx.sh
 # ssl_reject_handshake first appeared in 1.19.4. Keep boundary mocks local
@@ -15,7 +17,7 @@ source ./nx.sh
  done
 )
 root="$(mktemp -d)"
-trap 'rm -rf "$root"' EXIT
+trap 'nx_test_cleanup; rm -rf "$root"' EXIT
 CONF_DIR="$root/conf"; STATE_DIR="$root/state"; DOMAIN_ONLY_STATE="$STATE_DIR/domain-only.conf"
 # shellcheck disable=SC2034
 SUDO=''

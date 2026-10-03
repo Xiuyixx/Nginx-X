@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
+# shellcheck source=tests/fixtures/test-environment.sh
+source "$(dirname "${BASH_SOURCE[0]}")/fixtures/test-environment.sh"
 # shellcheck disable=SC1091
 source "$(dirname "$0")/../nx.sh"
 root="$(mktemp -d)"
@@ -8,9 +10,11 @@ nginx_bin="${NGINX_TEST_BIN:-/root/.openclaw/workspace/tmp/nginx-x-test-runtime/
 cleanup() {
  [[ ! -f "$root/nginx.pid" ]] || kill "$(cat "$root/nginx.pid")" 2>/dev/null || true
  [[ -z "${backend_pid:-}" ]] || kill "$backend_pid" 2>/dev/null || true
+ nx_test_wait_pidfile "$root/nginx.pid"
+ [[ -z "${backend_pid:-}" ]] || wait "$backend_pid" 2>/dev/null || true
  rm -rf "$root"
 }
-trap cleanup EXIT
+trap 'cleanup; nx_test_cleanup' EXIT
 # shellcheck disable=SC2034
 SUDO=""
 SSL_DIR="$root/ssl"
@@ -78,6 +82,7 @@ CONF
  grep -Fq "$scheme://example.com:$port" "$root/body.out"
  grep -Fq 'proxy_redirect http://custom.invalid https://keep.invalid;' "$root/site.conf"
  "$nginx_bin" -s quit -p "$root" -c "$root/nginx.conf"
+ nx_test_wait_pidfile "$root/nginx.pid"
  for ((i=0;i<100;i++)); do [[ -f "$root/nginx.pid" ]] || break; sleep .02; done
 done
 echo 'real frontend response URL round trips passed'

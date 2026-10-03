@@ -1,10 +1,12 @@
 #!/usr/bin/env bash
 set -euo pipefail
+# shellcheck source=tests/fixtures/test-environment.sh
+source "$(dirname "${BASH_SOURCE[0]}")/fixtures/test-environment.sh"
 cd "$(dirname "$0")/.."
 source ./nx.sh
 source ./lib/access.sh
 root=$(mktemp -d)
-trap '[[ ! -f "$root/nginx.pid" ]] || kill "$(cat "$root/nginx.pid")" 2>/dev/null || :; rm -rf "$root"' EXIT
+trap '[[ ! -f "$root/nginx.pid" ]] || kill "$(cat "$root/nginx.pid")" 2>/dev/null || :; nx_test_wait_pidfile "$root/nginx.pid"; rm -rf "$root"; nx_test_cleanup' EXIT
 CONF_DIR="$root/conf"; DOMAIN_ONLY_STATE="$root/state"; SUDO=''
 mkdir -p "$CONF_DIR"
 nginx_bin=${NGINX_TEST_BIN:-$(command -v nginx || true)}

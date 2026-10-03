@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
+# shellcheck source=tests/fixtures/test-environment.sh
+source "$(dirname "${BASH_SOURCE[0]}")/fixtures/test-environment.sh"
 REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # shellcheck disable=SC1091
 source "$REPO_DIR/nx.sh"
@@ -9,7 +11,7 @@ source "$REPO_DIR/lib/https.sh"
 # shellcheck disable=SC2034
 SUDO=""
 TEST_ROOT="$(mktemp -d)"
-trap 'rm -rf "$TEST_ROOT"' EXIT
+trap 'nx_test_cleanup; rm -rf "$TEST_ROOT"' EXIT
 SSL_DIR="$TEST_ROOT/ssl"
 mkdir -p "$SSL_DIR/example.com"
 NGINX_TEST_BIN="${NGINX_TEST_BIN:-$(command -v nginx || true)}"

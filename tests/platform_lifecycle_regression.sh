@@ -1,10 +1,12 @@
 #!/usr/bin/env bash
 # shellcheck disable=SC2317 # injected functions called through sourced menus
 set -euo pipefail
+# shellcheck source=tests/fixtures/test-environment.sh
+source "$(dirname "${BASH_SOURCE[0]}")/fixtures/test-environment.sh"
 cd "$(dirname "$0")/.."
 source ./nx.sh
 root="$(mktemp -d)"
-trap 'rm -rf "$root"' EXIT
+trap 'nx_test_cleanup; rm -rf "$root"' EXIT
 SUDO=""
 fail() { echo "FAIL: $*" >&2; exit 1; }
 # Real menu wrapper suppresses errexit inside actions: these must still stop.

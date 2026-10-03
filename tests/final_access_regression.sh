@@ -1,8 +1,10 @@
 #!/usr/bin/env bash
 set -euo pipefail
+# shellcheck source=tests/fixtures/test-environment.sh
+source "$(dirname "${BASH_SOURCE[0]}")/fixtures/test-environment.sh"
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 T="$(mktemp -d)"
-trap 'rm -rf "$T"' EXIT
+trap 'nx_test_cleanup; rm -rf "$T"' EXIT
 export NX_CONF_DIR="$T/conf" STATE_DIR="$T/admin-a" NGINX_MAIN_CONF="$T/nginx.conf"
 mkdir -p "$NX_CONF_DIR" "$STATE_DIR" "$T/admin-b"
 # shellcheck disable=SC1091

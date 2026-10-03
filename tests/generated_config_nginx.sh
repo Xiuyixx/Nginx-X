@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
+# shellcheck source=tests/fixtures/test-environment.sh
+source "$(dirname "${BASH_SOURCE[0]}")/fixtures/test-environment.sh"
 
 if ! command -v nginx >/dev/null 2>&1; then
   echo "skip: nginx is not installed"
@@ -10,7 +12,7 @@ REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$REPO_DIR"
 
 TMPDIR_ROOT="$(mktemp -d)"
-trap 'rm -rf "$TMPDIR_ROOT"' EXIT
+trap 'nx_test_cleanup; rm -rf "$TMPDIR_ROOT"' EXIT
 
 # shellcheck disable=SC1091
 source nx.sh

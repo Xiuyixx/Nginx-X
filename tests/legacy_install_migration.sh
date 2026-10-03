@@ -1,9 +1,11 @@
 #!/usr/bin/env bash
 set -euo pipefail
+# shellcheck source=tests/fixtures/test-environment.sh
+source "$(dirname "${BASH_SOURCE[0]}")/fixtures/test-environment.sh"
 cd "$(dirname "$0")/.."
 repo="$PWD"
 root="$(mktemp -d)"
-trap 'rm -rf "$root"' EXIT
+trap 'nx_test_cleanup; rm -rf "$root"' EXIT
 mkdir -p "$root/source/lib" "$root/source/tools" "$root/source/.git" "$root/bin"
 cp nx.sh install.sh "$root/source/"
 cp lib/*.sh "$root/source/lib/"

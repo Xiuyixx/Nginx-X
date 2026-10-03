@@ -1,10 +1,12 @@
 #!/usr/bin/env bash
 # shellcheck disable=SC2317 # functions are called through the real menu wrapper
 set -euo pipefail
+# shellcheck source=tests/fixtures/test-environment.sh
+source "$(dirname "${BASH_SOURCE[0]}")/fixtures/test-environment.sh"
 cd "$(dirname "$0")/.."
 source ./nx.sh
 root="$(mktemp -d)"
-trap 'rm -rf "$root"' EXIT
+trap 'nx_test_cleanup; rm -rf "$root"' EXIT
 SUDO=""
 CONF_DIR="$root/conf"; SSL_DIR="$root/ssl"; STATE_DIR="$root/state"
 DOMAIN_ONLY_STATE="$root/policy"; NGINX_MAIN_CONF="$root/nginx.conf"

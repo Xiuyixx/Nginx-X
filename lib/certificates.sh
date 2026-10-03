@@ -18,17 +18,27 @@ save_dns_conf() {
   local provider="$1"
   local key1="$2"
   local key2="$3"
-  ensure_state_dir
-  # 密钥属于敏感信息，先设置只读权限再写入，避免明文密钥被同机其他用户读到。
-  (
+  local tmp parent
+  ensure_state_dir || { error "无法准备 DNS API 配置目录。"; return 1; }
+  parent="$(dirname "$DNS_CONF")" || return 1
+  # Stage beside the destination: failures never truncate existing credentials.
+  # Reject directory/symlink targets rather than letting mv follow/nest them.
+  [[ ! -L "$DNS_CONF" && ( ! -e "$DNS_CONF" || -f "$DNS_CONF" ) ]] || {
+    error "DNS API 配置目标不是普通文件。"; return 1;
+  }
+  tmp="$(umask 077; mktemp "$parent/.dns.conf.XXXXXX")" || {
+    error "无法创建 DNS API 配置临时文件。"; return 1;
+  }
+  if ! (
     umask 077
-    {
-      printf 'DNS_PROVIDER=%q\n' "$provider"
-      printf 'DNS_KEY1=%q\n' "$key1"
-      printf 'DNS_KEY2=%q\n' "$key2"
-    } > "$DNS_CONF"
-  )
-  chmod 600 "$DNS_CONF" 2>/dev/null || true
+    printf 'DNS_PROVIDER=%q\n' "$provider" > "$tmp" || exit 1
+    printf 'DNS_KEY1=%q\n' "$key1" >> "$tmp" || exit 1
+    printf 'DNS_KEY2=%q\n' "$key2" >> "$tmp" || exit 1
+  ) || ! chmod 600 "$tmp" || ! mv -fT -- "$tmp" "$DNS_CONF"; then
+    rm -f -- "$tmp"
+    error "DNS API 配置保存失败，原配置未更改。"
+    return 1
+  fi
   info "DNS API 配置已保存到：${DNS_CONF}（权限 600）。"
   warn "提醒：DNS API 密钥以明文存储于该文件，请自行保护该主机的账户权限。"
 }
@@ -97,7 +107,7 @@ setup_dns_api() {
   esac
   [[ -z "$key1" ]] && { error "API Key 不能为空。"; return 1; }
 
-  save_dns_conf "$provider" "$key1" "${key2:-}"
+  save_dns_conf "$provider" "$key1" "${key2:-}" || return 1
 
   # Export env vars for acme.sh
   case "$provider" in
@@ -772,17 +782,13 @@ cert_list_action_menu() {
         return 0
         ;;
       3)
-        local -a refs
-        mapfile -t refs < <(cert_referenced_confs "$domain")
-        if [[ ${#refs[@]} -gt 0 ]]; then
-          warn "证书 ${domain} 仍被以下 Nginx 配置引用，已拒绝删除："
-          local ref
-          for ref in "${refs[@]}"; do
-            warn "  - ${ref}"
-          done
+        # Match the locked deletion check: active includes and structured TLS
+        # directives, not comments or unreferenced disabled/backup files.
+        if ! nx_acme_assert_unreferenced "$domain"; then
+          warn "证书 ${domain} 的活动引用检查未通过，已拒绝删除。"
           warn "请先停用对应站点 HTTPS 或手动移除证书引用，再删除证书。"
           pause
-          return 0
+          return 1
         fi
 
         if ! confirm "确认删除证书 ${domain} ?"; then
@@ -906,6 +912,7 @@ nx_acme_sync_routes() {
         tmp="$(mktemp)" || return 1
         nx_https_transform challenge "$file" "$domain" "$SSL_DIR" '' > "$tmp" || { rm -f "$tmp"; return 1; }
         if ! cmp -s "$tmp" "$file"; then
+          if [[ -L "$file" ]] || ! nx_assert_single_link "$file"; then rm -f "$tmp"; return 1; fi
           ${SUDO} tee "$file" < "$tmp" >/dev/null || { rm -f "$tmp"; return 1; }
         fi
         rm -f "$tmp"
@@ -1280,6 +1287,7 @@ nx_delete_certificate() (
   [[ ${NX_ACME_LOCK_HELD:-0} == 1 ]] || flock -x "$certificate_lock_fd" || return 1
   exec {certificate_conf_fd}<"$CONF_DIR" || return 1
   flock -x "$certificate_conf_fd" || return 1
+  nx_transaction_paths_safe || return 1
   # The service subprocess must not retain the outer deployment lock.
   local original_reload
   original_reload="$(declare -f reload_nginx_safe)" || return 1
@@ -1450,14 +1458,14 @@ PYREF
 }
 
 nx_certificate_apply_removal() {
-  if [[ ${NX_ACME_UNINSTALL_MODE:-online} == offline ]]; then
-    nx_acme_sync_routes
-  else
-    # The normal transaction deliberately skips reload for identical configs;
-    # certificate bytes are outside that snapshot and MUST still be validated.
-    # The caller already owns the configuration lock. Its route backup keeps
-    # this operation atomic without recursively flocking that same directory.
-    nx_acme_sync_routes && reload_nginx_safe
+  # Both callers own the directory lock and rollback snapshot. Route transforms
+  # strip generated guards/default flags: restore them even for offline cleanup,
+  # without recursively entering nx_transaction (and deadlocking its flock).
+  nx_acme_sync_routes || return 1
+  nx_access_sync_files || return 1
+  if [[ ${NX_ACME_UNINSTALL_MODE:-online} != offline ]]; then
+    # Certificate bytes changed even if configuration bytes are identical.
+    reload_nginx_safe || return 1
   fi
 }
 
@@ -1473,6 +1481,7 @@ nx_acme_uninstall_account() (
   flock -x "$uninstall_fd" || return 1
   exec {conf_fd}<"$CONF_DIR" || return 1
   flock -x "$conf_fd" || return 1
+  nx_transaction_paths_safe || return 1
   local owned domain backup path i rc=0 original_reload
   owned="$(nx_acme_owned_domains)" || return 1
   while IFS= read -r domain; do
@@ -1547,12 +1556,10 @@ nx_acme_uninstall_account() (
     rm -rf -- "$HOME/.acme.sh" || rc=1
     rm -f -- "$EMAIL_CONF" "$DNS_CONF" || rc=1
   fi
-  # No access/map regeneration is needed: only owned HTTP-01 routes change.
-  if (( ! rc )); then
-    if [[ -n "$owned" ]]; then nx_acme_sync_routes || rc=1; fi
-    # Empty accounts have no certificate bytes to validate; this also permits
-    # cleanup of an unused ACME install on a host without nginx.
-    if [[ -n "$owned" ]] && (( ! rc )); then reload_nginx_safe || rc=1; fi
+  # Empty accounts have no certificate bytes/routes to reconcile; this also
+  # permits cleanup of an unused ACME install on a host without nginx.
+  if (( ! rc )) && [[ -n "$owned" ]]; then
+    nx_certificate_apply_removal || rc=1
   fi
   trap '' HUP INT TERM
   if (( rc )); then nx_uninstall_restore; return 1; fi

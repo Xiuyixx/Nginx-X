@@ -1,10 +1,12 @@
 #!/usr/bin/env bash
 # shellcheck disable=SC2317,SC2218 # function overridden after testing original
 set -euo pipefail
+# shellcheck source=tests/fixtures/test-environment.sh
+source "$(dirname "${BASH_SOURCE[0]}")/fixtures/test-environment.sh"
 cd "$(dirname "$0")/.."
 source ./nx.sh
 T="$(mktemp -d)"
-trap 'rm -rf "$T"' EXIT
+trap 'nx_test_cleanup; rm -rf "$T"' EXIT
 cat > "$T/site.conf" <<'EOF'
 server { listen 127.0.0.2:18443 ssl; listen [::1]:18443 ssl; server_name main.example alias.example; }
 EOF

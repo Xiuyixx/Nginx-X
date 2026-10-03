@@ -179,6 +179,7 @@ nx_access_site_policy() {
 nx_access_metadata() {
   local file="$1" key="$2" value="$3" tmp
   [[ -f "$file" && ! -L "$file" ]] || return 1
+  nx_assert_single_link "$file" || return 1
   tmp="$(mktemp)" || return 1
   if nx_conf_query metadata-set "$file" "$key" "$value" > "$tmp"; then
     ${SUDO:-} tee "$file" < "$tmp" >/dev/null || { rm -f "$tmp"; return 1; }
@@ -209,12 +210,13 @@ nx_access_sync_files() {
   mapfile -t files < <(list_managed_conf_files 0)
   for file in "${files[@]}"; do
     [[ ! -L "$file" ]] || { rm -rf "$stage"; nx_access_error "不修改符号链接 $file"; return 1; }
+    nx_assert_single_link "$file" || { rm -rf "$stage"; return 1; }
     name="$(basename "$file")"; managed["$file"]=1
     policy="$(nx_access_site_policy "$file")" || { rm -rf "$stage"; return 1; }
-    defaults="$(conf_meta_get "$file" access_default)"
+    defaults="$(conf_meta_get "$file" access_default)" || { rm -rf "$stage"; return 1; }
     if ! nx_access_parse "$file" transform "$([[ "$policy" == strict ]] && echo 1 || echo 0)" "$defaults" > "$stage/$name"; then rm -rf "$stage"; return 1; fi
     # Scan the generated default flags (strip marker comment, not flag).
-    sed 's/ # nx-access-default//' "$stage/$name" > "$stage/scan"
+    sed 's/ # nx-access-default//' "$stage/$name" > "$stage/scan" || { rm -rf "$stage"; return 1; }
     rows="$(nx_access_parse "$stage/scan")" || { rm -rf "$stage"; return 1; }
     while IFS='|' read -r _server socket ssl def _names; do
       [[ -n "$socket" ]] || continue
@@ -287,9 +289,10 @@ nx_access_sync_files() {
 nx_access_global_files() {
   [[ "$1" == 0 || "$1" == 1 ]] || return 1
   [[ ! -L "$DOMAIN_ONLY_STATE" ]] || return 1
+  nx_assert_single_link "$DOMAIN_ONLY_STATE" || return 1
   local tmp
   tmp="$(mktemp)" || return 1
-  printf 'DOMAIN_ONLY=%s\n' "$1" > "$tmp"
+  printf 'DOMAIN_ONLY=%s\n' "$1" > "$tmp" || { rm -f "$tmp"; return 1; }
   if ! ${SUDO:-} mkdir -p "$(dirname "$DOMAIN_ONLY_STATE")" ||
      ! ${SUDO:-} install -m 644 "$tmp" "$DOMAIN_ONLY_STATE"; then
     rm -f "$tmp"; return 1
@@ -335,7 +338,7 @@ nx_default_site_menu() {
   [[ -f "$file" && "$file" == *.conf ]] || { error '请先启用本站配置。'; return 1; }
   rows="$(nx_access_parse "$file")" || return 1
   mapfile -t sockets < <(cut -d '|' -f2 <<< "$rows" | sort -u)
-  defaults="$(conf_meta_get "$file" access_default)"
+  defaults="$(conf_meta_get "$file" access_default)" || return 1
   echo "本站默认入口：${defaults:-未设置}"
   for i in "${!sockets[@]}"; do echo "$((i+1))) ${sockets[$i]}"; done
   echo 'c) 清除本站默认入口设置'

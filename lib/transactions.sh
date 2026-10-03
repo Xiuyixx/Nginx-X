@@ -12,6 +12,9 @@ nx_transaction() (
   command -v flock >/dev/null 2>&1 || { error "事务需要 flock（util-linux）。"; return 1; }
   exec {lock_fd}<"$CONF_DIR" || return 1
   flock -x "$lock_fd" || return 1
+  # Existing inode aliases outside the snapshot cannot be restored by a
+  # directory rollback. Reject them before any migration/callback can write.
+  nx_transaction_paths_safe || return 1
 
   local snapshot rc=0 state_existed=0 main_existed=0 main_target=""
   # Read by ensure_websocket_map in nx.sh through Bash dynamic scope.
@@ -86,7 +89,7 @@ nx_transaction() (
     elif [[ -e "$NGINX_MAIN_CONF" ]]; then return 0; fi
     return 1
   }
-  if nx_access_migrate_state && "$@" && nx_acme_sync_routes && ensure_websocket_map && nx_access_sync_files &&
+  if nx_access_migrate_state && "$@" && nx_transaction_paths_safe && nx_acme_sync_routes && ensure_websocket_map && nx_access_sync_files &&
      { ! nx_transaction_changed || nx_transaction_reload; }; then
     trap - HUP INT TERM
     ${SUDO} rm -rf "$snapshot"
@@ -189,7 +192,7 @@ edit_conf_manual() {
 nx_site_https_toggle() {
   local file="$1" domain
   [[ "$file" == *.conf ]] || { error "请先启用站点。"; return 1; }
-  domain="$(extract_domain_from_conf "$file")"
+  domain="$(extract_domain_from_conf "$file")" || return 1
   if conf_https_enabled "$file"; then
     disable_https_for_conf_file "$domain" "$file"
   else
@@ -209,6 +212,31 @@ nx_conf_path_allowed() {
   [[ -n "$1" && "$(dirname -- "$1")" == "$CONF_DIR" && ! -L "$1" && "$(basename -- "$1")" != .* ]] || {
     error "拒绝事务目录外路径或符号链接：$1"; return 1;
   }
+  nx_assert_single_link "$1"
+}
+
+# In-place preservative writes keep the existing owner/mode. They are allowed
+# only for an unaliased regular inode. Newly generated files retain their
+# explicit install mode; neither path may modify an external hardlink alias.
+nx_assert_single_link() {
+  local links
+  [[ -e "$1" ]] || return 0
+  [[ -f "$1" ]] || { error "配置路径必须是普通文件：$1"; return 1; }
+  links="$(${SUDO:-} stat -c '%h' -- "$1")" || return 1
+  [[ "$links" == 1 ]] || { error "拒绝硬链接配置（事务无法恢复外部别名）：$1"; return 1; }
+}
+
+nx_transaction_paths_safe() {
+  local linked main
+  # Includes hidden derived files, disabled sites and nested directory files.
+  linked="$(${SUDO:-} find "$CONF_DIR" -type f -links +1 -print -quit)" || return 1
+  [[ -z "$linked" ]] || { error "拒绝硬链接配置（事务范围外别名）：$linked"; return 1; }
+  main="$NGINX_MAIN_CONF"
+  if [[ -L "$main" ]]; then
+    main="$(readlink -f "$main")" || return 1
+    [[ -f "$main" ]] || return 1
+  fi
+  nx_assert_single_link "$main" && nx_assert_single_link "$DOMAIN_ONLY_STATE"
 }
 nx_assert_new_target() {
   local base="${1%.bak}"
@@ -226,8 +254,8 @@ nx_preserve_modify_tls() {
   [[ "$domain" == "$old_domain" || -f "$SSL_DIR/$domain/fullchain.pem" && -f "$SSL_DIR/$domain/privkey.pem" ]] || {
     error "HTTPS 修改需要目标域名的现有证书；原配置保持不变。"; return 1;
   }
-  original="$(conf_meta_get "$src" https_original_listen_port)"
-  [[ -n "$original" ]] || original="$(conf_meta_get "$src" listen_port)"
+  original="$(conf_meta_get "$src" https_original_listen_port)" || return 1
+  if [[ -z "$original" ]]; then original="$(conf_meta_get "$src" listen_port)" || return 1; fi
   [[ -n "$original" ]] || original=80
   stage="$(mktemp)" || return 1
   [[ "$domain" != "$old_domain" ]] || preserve_source=("$src")

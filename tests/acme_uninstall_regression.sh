@@ -1,9 +1,11 @@
 #!/usr/bin/env bash
 set -euo pipefail
+# shellcheck source=tests/fixtures/test-environment.sh
+source "$(dirname "${BASH_SOURCE[0]}")/fixtures/test-environment.sh"
 # shellcheck disable=SC1091
 source "$(dirname "$0")/../nx.sh"
 tmp="$(mktemp -d)"
-trap 'rm -rf "$tmp"' EXIT
+trap 'nx_test_cleanup; rm -rf "$tmp"' EXIT
 export HOME="$tmp/home"
 # shellcheck disable=SC2034
 SUDO=''

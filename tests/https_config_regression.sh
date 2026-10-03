@@ -1,11 +1,13 @@
 #!/usr/bin/env bash
 set -euo pipefail
+# shellcheck source=tests/fixtures/test-environment.sh
+source "$(dirname "${BASH_SOURCE[0]}")/fixtures/test-environment.sh"
 
 REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$REPO_DIR"
 
 TMPDIR_ROOT="$(mktemp -d)"
-trap 'rm -rf "$TMPDIR_ROOT"' EXIT
+trap 'nx_test_cleanup; rm -rf "$TMPDIR_ROOT"' EXIT
 
 MOCK_BIN="$TMPDIR_ROOT/bin"
 mkdir -p "$MOCK_BIN"

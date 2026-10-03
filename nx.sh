@@ -426,13 +426,6 @@ nginx_latest_version_online() {
     -A 'Nginx-X version-check' \
     https://nginx.org/en/download.html 2>/dev/null || true)"
 
-  # fallback: try http if https fails (some environments have TLS issues)
-  if [[ -z "$page" ]]; then
-    page="$(curl -fsSL --connect-timeout 4 --max-time 8 \
-      -A 'Nginx-X version-check' \
-      http://nginx.org/en/download.html 2>/dev/null || true)"
-  fi
-
   latest="$(printf '%s' "$page" | awk '
     /Stable version/ {in_stable=1; next}
     in_stable && /Mainline version/ {in_stable=0}
@@ -1230,7 +1223,7 @@ add_reverse_proxy() {
     if port_has_ssl_listener "$desired_port"; then
       if [[ -f "${SSL_DIR}/${domain}/fullchain.pem" && -f "${SSL_DIR}/${domain}/privkey.pem" ]]; then
         warn "检测到端口 ${desired_port} 已用于 HTTPS，且当前域名已有证书。"
-        warn "将先写入临时 HTTP 配置，再自动切换为 ${desired_port} HTTPS。"
+        warn "将在临时文件生成最终 HTTPS 配置，再一次性发布。"
         create_port="80"
         force_enable_https="1"
       else
@@ -1246,15 +1239,24 @@ add_reverse_proxy() {
   trap 'rm -f "${tmp:-}"' RETURN
 
   build_proxy_conf "$domain" "$create_port" "$backend_port" "$tmp" || { rm -f "$tmp"; return 1; }
+  if [[ "$force_enable_https" == "1" ]]; then
+    local tls_tmp
+    tls_tmp="$(mktemp /tmp/nginxx-final-tls-XXXXXX)" || { rm -f "$tmp"; return 1; }
+    if ! nx_https_transform enable "$tmp" "$domain" "$SSL_DIR" "$desired_port" > "$tls_tmp"; then
+      rm -f "$tls_tmp" "$tmp"
+      error "生成最终 HTTPS 配置失败；未发布站点。"
+      return 1
+    fi
+    if ! mv -f "$tls_tmp" "$tmp"; then
+      rm -f "$tls_tmp" "$tmp"
+      return 1
+    fi
+  fi
   if nx_transaction nx_add_conf "$tmp" "$target"; then
     info "反向代理配置已生效：${target}"
 
     if [[ "$force_enable_https" == "1" ]]; then
-      if enable_https_for_conf_file "$domain" "$target" "$desired_port"; then
-        info "已完成：同端口 HTTPS 复用配置已自动启用。"
-      else
-        warn "自动切换 HTTPS 失败。请检查证书文件是否存在，以及 nginx 配置是否通过校验。"
-      fi
+      info "已完成：同端口 HTTPS 复用配置已一次性启用。"
       rm -f "$tmp"
       return 0
     fi
@@ -1369,7 +1371,7 @@ add_external_url_proxy() {
     if port_has_ssl_listener "$desired_port"; then
       if [[ -f "${SSL_DIR}/${domain}/fullchain.pem" && -f "${SSL_DIR}/${domain}/privkey.pem" ]]; then
         warn "检测到端口 ${desired_port} 已用于 HTTPS，且当前域名已有证书。"
-        warn "将先写入临时 HTTP 配置，再自动切换为 ${desired_port} HTTPS。"
+        warn "将在临时文件生成最终 HTTPS 配置，再一次性发布。"
         create_port="80"
         force_enable_https="1"
       else
@@ -1385,15 +1387,24 @@ add_external_url_proxy() {
   trap 'rm -f "${tmp:-}"' RETURN
 
   build_external_proxy_conf "$domain" "$create_port" "$upstream_url" "$external_mode" "$tmp" "0" "$stream_upstream_url" "$source_site_url" "$referer_url" "$stream_upstream_urls" || { rm -f "$tmp"; return 1; }
+  if [[ "$force_enable_https" == "1" ]]; then
+    local tls_tmp
+    tls_tmp="$(mktemp /tmp/nginxx-final-tls-XXXXXX)" || { rm -f "$tmp"; return 1; }
+    if ! nx_https_transform enable "$tmp" "$domain" "$SSL_DIR" "$desired_port" > "$tls_tmp"; then
+      rm -f "$tls_tmp" "$tmp"
+      error "生成最终 HTTPS 配置失败；未发布站点。"
+      return 1
+    fi
+    if ! mv -f "$tls_tmp" "$tmp"; then
+      rm -f "$tls_tmp" "$tmp"
+      return 1
+    fi
+  fi
   if nx_transaction nx_add_conf "$tmp" "$target"; then
     info "外部反代配置已生效：${target}"
 
     if [[ "$force_enable_https" == "1" ]]; then
-      if enable_https_for_conf_file "$domain" "$target" "$desired_port"; then
-        info "已完成：同端口 HTTPS 复用配置已自动启用。"
-      else
-        warn "自动切换 HTTPS 失败。请检查证书文件是否存在，以及 nginx 配置是否通过校验。"
-      fi
+      info "已完成：同端口 HTTPS 复用配置已一次性启用。"
       rm -f "$tmp"
       return 0
     fi

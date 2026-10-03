@@ -74,6 +74,7 @@ install_local() {
   fi
 
   [[ "$TARGET_BIN" == /* && "$TARGET_BIN" != */ ]] || { echo "[ERROR] TARGET_BIN must be an absolute file path"; return 1; }
+  [[ ! -d "$TARGET_BIN" ]] || { echo "[ERROR] TARGET_BIN is a directory (or directory symlink)"; return 1; }
   ${SUDO} mkdir -p "$(dirname "$TARGET_BIN")" || return 1
   # Resolve only the parent: replacing a symlink must not overwrite its target.
   TARGET_BIN="$(cd "$(dirname "$TARGET_BIN")" && pwd -P)/$(basename "$TARGET_BIN")"
@@ -84,7 +85,7 @@ install_local() {
     return 1
   fi
   stage="$(${SUDO} mktemp "${TARGET_BIN}.stage.XXXXXX")" || { rm -f "$bundle"; return 1; }
-  if ! ${SUDO} install -m 0755 "$bundle" "$stage" || ! ${SUDO} mv -f "$stage" "$TARGET_BIN"; then
+  if ! ${SUDO} install -m 0755 "$bundle" "$stage" || ! ${SUDO} mv -fT "$stage" "$TARGET_BIN"; then
     ${SUDO} rm -f "$stage"
     rm -f "$bundle"
     return 1

@@ -474,6 +474,13 @@ def inspect(filename, query=operation):
             return nodes, len(text)
 
         nodes, _ = parse()
+        # Policy transforms must not silently erase corrupt metadata, including
+        # when invoked beneath a menu's conditional (where errexit is disabled).
+        for key in ('access_policy', 'access_default'):
+            # The explicit low-level setter may repair its selected field;
+            # all reads/transforms and unrelated duplicate fields fail closed.
+            if query == 'metadata-set' and params and params[0] == key: continue
+            if len(metadata.get(key, [])) > 1: fail('duplicate metadata: ' + key)
         if query in ('metadata-set', 'metadata-drop', 'strip-access'):
             edits = []
             if query == 'strip-access':
@@ -579,13 +586,27 @@ def inspect(filename, query=operation):
             def listeners(lines):
                 return [(p[1],p[2],p[0]) for p in (line.split('|') for line in lines) if len(p)>2]
             before, after = listeners(oldrows), listeners(newrows)
-            mapping={}
-            for a,b in zip(before,after):
-                if a[1:]==b[1:]: mapping[a[0]]=b[0]
+            # Socket identity, not directive position, owns a default entry.
+            # Preserve surviving sockets first. Only a unique removed/added
+            # pair on the same canonical IP may represent a port migration;
+            # TLS flags and server ordering can change during HTTPS conversion.
+            before_sockets = {socket(r[0]) for r in before}
+            after_sockets = {socket(r[0]) for r in after}
+            removed = before_sockets - after_sockets
+            added = after_sockets - before_sockets
+            def address(s): return s.rsplit(':', 1)[0]
             result=[]
             for s in old:
-                s=socket(s); s=mapping.get(s,s)
-                if s in {r[0] for r in after} and s not in result: result.append(s)
+                s=socket(s)
+                if s not in after_sockets:
+                    if s not in removed: continue  # stale metadata
+                    candidates = [n for n in added if address(n) == address(s)]
+                    peers = [n for n in removed if address(n) == address(s)]
+                    if not candidates: continue  # removed listener, no migration
+                    if len(candidates) != 1 or len(peers) != 1:
+                        fail('ambiguous default socket migration: ' + s)
+                    s = candidates[0]
+                if s not in result: result.append(s)
             print(','.join(result))
         else: fail('unknown query')
     except (ValueError, OSError, UnicodeError, IndexError) as exc:
