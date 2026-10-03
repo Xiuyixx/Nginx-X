@@ -2659,8 +2659,8 @@ main_menu() {
   echo "2) 配置管理"
   echo "3) 证书管理"
   echo "4) 实时信息"
-  echo "5) 卸载"
-  echo "6) 更新脚本"
+  echo "5) 更新脚本"
+  echo "6) 卸载"
   echo "0) 退出"
   echo "========================================"
 }
@@ -2681,8 +2681,8 @@ main() {
       2) config_entry_menu ;;
       3) cert_menu ;;
       4) realtime_info_menu ;;
-      5) uninstall_menu ;;
-      6) NX_IN_MENU=1 run_menu_action update_script; NX_IN_MENU=0; pause ;;
+      5) NX_IN_MENU=1 run_menu_action update_script; NX_IN_MENU=0; pause ;;
+      6) uninstall_menu ;;
       0) info "已退出 ${APP_NAME}。"; exit 0 ;;
       *) warn "无效输入，请输入主菜单中的编号（0-6）。"; pause ;;
     esac
