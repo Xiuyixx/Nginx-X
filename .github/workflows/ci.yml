@@ -77,3 +77,21 @@ jobs:
               apk add --no-cache bash nginx python3 openssl curl sudo shadow coreutils findutils procps util-linux
               NX_ACME_ISOLATED=1 bash "tests/acme_${ACME_PROOF}_isolated.sh"
             '
+
+  audit-isolated:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+      - name: Verify deployment, scheduler and joint backup in disposable container
+        run: |
+          docker run --rm -v "$PWD:/project:ro" -w /project alpine:3.22 sh -ec '
+            apk add --no-cache bash nginx python3 openssl curl sudo shadow coreutils findutils procps util-linux
+            chmod 0755 /tmp
+            NX_CERT_AUDIT_NAMESPACE=1 bash tests/cert_audit_20261004.sh
+            bash tests/system_audit_20261004.sh
+          '
+      - name: Verify strict policy with real requests in private namespaces
+        run: |
+          sudo apt-get update && sudo apt-get install -y nginx iproute2 util-linux
+          sudo NGINX_BIN=/usr/sbin/nginx bash tests/policy_audit_20261004.sh

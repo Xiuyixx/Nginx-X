@@ -481,9 +481,9 @@ def inspect(filename, query=operation):
             # all reads/transforms and unrelated duplicate fields fail closed.
             if query == 'metadata-set' and params and params[0] == key: continue
             if len(metadata.get(key, [])) > 1: fail('duplicate metadata: ' + key)
-        if query in ('metadata-set', 'metadata-drop', 'strip-access'):
+        if query in ('metadata-set', 'metadata-drop', 'strip-access', 'policy-batch'):
             edits = []
-            if query == 'strip-access':
+            if query in ('strip-access', 'policy-batch'):
                 begin = None
                 for line, start, end, level in comments:
                     marker = text[start:end].rstrip('\r\n')
@@ -510,7 +510,20 @@ def inspect(filename, query=operation):
                     edits.append((len(text), len(text), ('\n' if text and not text.endswith('\n') else '') + '# ' + params[0] + '=' + params[1] + '\n'))
             for start, end, value in sorted(edits, reverse=True):
                 text = text[:start] + value + text[end:]
-            sys.stdout.write(text)
+            if query == 'policy-batch':
+                # Invocation-local immutable input cache: strictly parse every
+                # site before transforming/publishing anything; never reused
+                # across rounds or after writes. Preserve all refusal checks.
+                values = [metadata.get(key, [(0, 0, '')])[0][2]
+                          for key in ('access_policy', 'access_default')]
+                if any(any(c in value for c in '\r\n') for value in values):
+                    fail('unsupported policy metadata')
+                with open(os.path.join(params[0], str(batch_index) + '.clean'), 'w', encoding='utf-8', newline='') as out:
+                    out.write(text)
+                with open(os.path.join(params[0], str(batch_index) + '.meta'), 'w', encoding='utf-8', newline='') as out:
+                    out.write('\n'.join(values) + '\n')
+            else:
+                sys.stdout.write(text)
             return
         if query == "tree": return nodes
         def walk(nodes):
@@ -613,7 +626,7 @@ def inspect(filename, query=operation):
         print('Config inspection refused: '+str(exc), file=sys.stderr)
         sys.exit(1)
 
-for filename in ([filename] + params if operation in ('list', 'traffic') else [filename]):
+for batch_index, filename in enumerate(([filename] + params[1:] if operation == 'policy-batch' else [filename] + params if operation in ('list', 'traffic') else [filename])):
     inspect(filename)
 PYCONF
 }

@@ -250,6 +250,9 @@ _issue_cert_http() {
   valid_domain "$domain" || return 1
   local challenge_conf="" NX_ACME_PENDING="$domain"
 
+  # Prerequisites must fail before publishing any challenge helper/marker.
+  ensure_acme_installed || return 1
+  nx_acme_prepare_webroot || return 1
   nx_transaction nx_acme_prepare_routes "$domain" || return 1
 
   local pre_rc=0
@@ -286,9 +289,6 @@ _issue_cert_http() {
       warn "你选择强制继续申请。"
     fi
   fi
-
-  ensure_acme_installed || return 1
-  nx_acme_prepare_webroot || return 1
 
   note "开始为 ${domain} 申请证书（HTTP 验证）..."
   "$HOME/.acme.sh/acme.sh" --set-default-ca --server letsencrypt >/dev/null 2>&1 || true
@@ -371,36 +371,28 @@ ensure_acme_installed() {
 }
 
 nx_deploy_certificate() {
-  local domain="$1" stage
+  local domain="$1"
   valid_domain "$domain" || return 1
   nx_acme_check_account_identity || return 1
   nx_acme_prepare_dispatch || return 1
-  stage="$HOME/.acme.sh/nginxx-deploy/$domain"
-  (umask 077; mkdir -p "$stage") || return 1
-  local -a ecc=()
-  [[ ! -d "$HOME/.acme.sh/${domain}_ecc" ]] || ecc=(--ecc)
-  (
-    # Cron must not read an account pair while acme.sh is still writing it.
-    exec {stage_lock_fd}<"$SSL_DIR" || exit 1
-    flock -x "$stage_lock_fd" || exit 1
-    (
-      exec {stage_lock_fd}<&-
-      umask 077
-      "$HOME/.acme.sh/acme.sh" --install-cert -d "$domain" "${ecc[@]}" \
-        --key-file "$stage/privkey.pem" --fullchain-file "$stage/fullchain.pem" --reloadcmd ':'
-    )
-  ) || return 1
-  nx_acme_register_domain "$domain" || return 1
-  ${SUDO} "$NX_ACME_DISPATCH" deploy
+  # The dispatcher owns one lock across account staging, manifest registration,
+  # validation and publication. No unlock gap lets cron observe a partial pair.
+  ${SUDO} "$NX_ACME_DISPATCH" install "$domain"
 }
 
-ensure_acme_cron() {
+# Lock flags are inherited by nested calls, not persisted in the caller.
+# shellcheck disable=SC2030
+ensure_acme_cron() (
+  local scheduler_fd
+  exec {scheduler_fd}<"$SSL_DIR" || return 1
+  flock -x "$scheduler_fd" || return 1
+  NX_ACME_SCHEDULER_HELD=1
   nx_acme_privileged_paths
   ${SUDO} test -x "$NX_ACME_DISPATCH" || { error "请先完成证书部署。"; return 1; }
   nx_acme_privileged_cron enable || return 1
   # Retire only this account's legacy jobs after the protected job exists.
   NX_ACME_USER_CRON_ONLY=1 disable_acme_cron
-}
+)
 
 # Parse shell words rather than matching substrings: acme.sh quotes its path,
 # sometimes as "/home/user/.acme.sh"/acme.sh. Never match another account.
@@ -461,7 +453,12 @@ has_acme_cron_task() {
   return 1
 }
 
-disable_acme_cron() {
+# shellcheck disable=SC2030,SC2031
+disable_acme_cron() (
+  local scheduler_fd
+  exec {scheduler_fd}<"$SSL_DIR" || return 1
+  [[ ${NX_ACME_SCHEDULER_HELD:-0} == 1 || ${NX_ACME_LOCK_HELD:-0} == 1 ]] || flock -x "$scheduler_fd" || return 1
+  NX_ACME_SCHEDULER_HELD=1
   if [[ ${NX_ACME_USER_CRON_ONLY:-0} != 1 ]]; then
     nx_acme_privileged_cron remove || return 1
   fi
@@ -478,7 +475,7 @@ disable_acme_cron() {
       ${SUDO} rm -f "$script" || return 1
     fi
   done
-}
+)
 
 # Upgrade installed certificates belonging to this acme account without issuing
 # certificates or enabling a deliberately disabled renewal schedule.
@@ -748,7 +745,7 @@ cert_list_action_menu() {
     clear
     echo "====== 证书操作：${domain} ======"
     echo "1) 重新申请"
-    echo "2) 启停续期"
+    echo "2) 启停当前 ACME 账户全部证书的续期"
     echo "3) 删除证书"
     echo "0) 返回上一级"
     echo "============================="
@@ -770,11 +767,11 @@ cert_list_action_menu() {
         ;;
       2)
         if has_acme_cron_task; then
-          if confirm "当前续期任务已开启，是否关闭？"; then
+          if confirm "当前 ACME 账户全部证书的续期已开启，是否全部关闭？"; then
             disable_acme_cron
           fi
         else
-          if confirm "当前续期任务未开启，是否开启？"; then
+          if confirm "当前 ACME 账户全部证书的续期未开启，是否全部开启？"; then
             enable_acme_cron
           fi
         fi
@@ -836,7 +833,7 @@ cert_list_menu() {
     fi
 
     for i in "${!certs[@]}"; do
-      echo "$((i+1))) ${certs[$i]}  [续期任务: ${renew_status}]"
+      echo "$((i+1))) ${certs[$i]}  [账户级续期: ${renew_status}]"
     done
     echo "0) 返回上一级"
     echo "============================"
@@ -932,6 +929,7 @@ nx_acme_sync_routes() {
 
 nx_acme_render_helper() {
   cat <<EOFHELPER
+# nx_helper=acme-http01
 server {
     listen 80;
     server_name $1;
@@ -976,7 +974,11 @@ nx_acme_prepare_dispatch() {
     printf 'account=%q\naccount_home=%q\nssl=%q\nmanifest=%q\n' "$user" "$HOME" "$SSL_DIR" "$NX_ACME_MANIFEST"
     cat <<'DISPATCH'
 [[ $EUID == 0 ]] || exit 1
-as_account() { su -s /bin/sh "$account" -c "$1"; }
+as_account() (
+  # Hooks/daemons must not inherit the dispatcher lock descriptor.
+  if [[ -n ${deploy_fd:-} ]]; then exec {deploy_fd}<&-; fi
+  su -s /bin/sh "$account" -c "$1"
+)
 quote() { printf "'%s'" "${1//\'/\'\\\'\'}"; }
 # Validate before opening the lock inode; a substituted FIFO must not block.
 python3 - "$ssl" <<'PYLOCKTRUST'
@@ -1008,6 +1010,74 @@ if pwd.getpwnam(sys.argv[1]).pw_uid==0:
         if s.st_uid or s.st_mode&0o022 or (not stat.S_ISDIR(s.st_mode) and (not stat.S_ISREG(s.st_mode) or s.st_nlink!=1)):
             sys.exit('unsafe root ACME account: '+path)
 PYROOTACCOUNT
+# Interactive deployment is a rollback-capable transaction under deploy_fd.
+# Account-owned staging is copied/restored as that account, never as root.
+install_backup=''
+manifest_backup=''
+manifest_existed=0
+install_committed=0
+install_account_dir=''
+restore_install() {
+  local rc=$?
+  trap - EXIT HUP INT TERM
+  if [[ -n "$install_backup" ]]; then
+    if (( ! install_committed )); then
+      if ! as_account "rm -rf -- $(quote "$install_stage") && if test -e $(quote "$install_backup/original") || test -L $(quote "$install_backup/original"); then mv -- $(quote "$install_backup/original") $(quote "$install_stage"); fi"; then
+        echo "account stage rollback failed; backup retained: $install_backup" >&2
+        exit 1
+      fi
+      if [[ -n "$install_account_dir" ]]; then
+        as_account "rm -rf -- $(quote "$install_account_dir") && if test -e $(quote "$install_backup/account") || test -L $(quote "$install_backup/account"); then mv -- $(quote "$install_backup/account") $(quote "$install_account_dir"); fi" || { echo "ACME domain state backup retained: $install_backup" >&2; exit 1; }
+      fi
+      if (( manifest_existed )); then
+        mv -fT -- "$manifest_backup" "$manifest" || { echo "manifest backup retained: $manifest_backup" >&2; exit 1; }
+      else
+        rm -f -- "$manifest" || exit 1
+      fi
+    fi
+    as_account "rm -rf -- $(quote "$install_backup")" || exit 1
+    rm -f -- "$manifest_backup" || exit 1
+  fi
+  exit "$rc"
+}
+if [[ ${1:-} == install ]]; then
+  domain=${2:-}
+  [[ "$domain" =~ ^[a-zA-Z0-9][a-zA-Z0-9.-]*$ && "$domain" != *..* ]] || exit 1
+  install_stage="$account_home/.acme.sh/nginxx-deploy/$domain"
+  # Check ownership conflicts before any staging write.
+  python3 - "$manifest" "$domain" <<'PYINSTALLCHECK'
+import glob,os,stat,sys
+manifest,domain=sys.argv[1:]
+for path in glob.glob(os.path.dirname(manifest)+'/acme-*.domains'):
+    s=os.lstat(path)
+    if not stat.S_ISREG(s.st_mode) or s.st_nlink!=1 or s.st_uid or s.st_mode&0o022: sys.exit('unsafe manifest')
+    if path!=manifest and domain in open(path).read().splitlines(): sys.exit('domain belongs to another account')
+PYINSTALLCHECK
+  manifest_backup=$(mktemp "$(dirname "$manifest")/.install-manifest-XXXXXX")
+  if [[ -e "$manifest" ]]; then cp -a -- "$manifest" "$manifest_backup"; manifest_existed=1; fi
+  install_backup=$(as_account "umask 077; mkdir -p $(quote "$account_home/.acme.sh/nginxx-deploy") && mktemp -d $(quote "$account_home/.acme.sh/nginxx-deploy/.rollback-XXXXXX")") || { rm -f -- "$manifest_backup"; exit 1; }
+  # Finish the snapshot before arming rollback; failure here has not changed stage.
+  if ! as_account "if test -e $(quote "$install_stage") || test -L $(quote "$install_stage"); then cp -a -- $(quote "$install_stage") $(quote "$install_backup/original"); fi"; then
+    as_account "rm -rf -- $(quote "$install_backup")"; rm -f -- "$manifest_backup"; exit 1
+  fi
+  install_account_dir="$account_home/.acme.sh/$domain"
+  [[ ! -d "$account_home/.acme.sh/${domain}_ecc" ]] || install_account_dir="$account_home/.acme.sh/${domain}_ecc"
+  if ! as_account "if test -e $(quote "$install_account_dir") || test -L $(quote "$install_account_dir"); then cp -a -- $(quote "$install_account_dir") $(quote "$install_backup/account"); fi"; then
+    as_account "rm -rf -- $(quote "$install_backup")"; rm -f -- "$manifest_backup"; exit 1
+  fi
+  trap restore_install EXIT
+  trap 'exit 1' HUP INT TERM
+  as_account "umask 077; mkdir -p $(quote "$install_stage") && HOME=$(quote "$account_home") $(quote "$account_home/.acme.sh/acme.sh") --install-cert -d $(quote "$domain") $([[ ! -d "$account_home/.acme.sh/${domain}_ecc" ]] || printf -- '--ecc') --key-file $(quote "$install_stage/privkey.pem") --fullchain-file $(quote "$install_stage/fullchain.pem") --reloadcmd ':'"
+  python3 - "$manifest" "$domain" <<'PYINSTALLREGISTER'
+import os,sys,tempfile
+path,domain=sys.argv[1:]
+lines=open(path).read().splitlines() if os.path.exists(path) else []
+if domain not in lines: lines.append(domain)
+fd,tmp=tempfile.mkstemp(dir=os.path.dirname(path))
+with os.fdopen(fd,'w') as out: out.write(''.join(x+'\n' for x in lines))
+os.replace(tmp,path)
+PYINSTALLREGISTER
+fi
 if [[ ${1:-} == cron ]]; then
   (exec {deploy_fd}<&-; as_account "HOME=$(quote "$account_home") $(quote "$account_home/.acme.sh/acme.sh") --cron --home $(quote "$account_home/.acme.sh")") || exit $?
 fi
@@ -1110,6 +1180,7 @@ except BaseException:
 else:
     for stage in plans: shutil.rmtree(stage)
 PYPUBLISH
+install_committed=1
 DISPATCH
   } > "$tmp"
   if ! ${SUDO} python3 - /usr/local/libexec /var/lib/nginxx "$SSL_DIR" <<'PYMKTRUST'
@@ -1145,11 +1216,23 @@ if os.path.lexists(path):
         sys.exit('unsafe dispatcher target')
 PYDISPATCHTARGET
   then rm -f "$tmp"; return 1; fi
-  ${SUDO} install -o root -g root -m 0700 "$tmp" "$NX_ACME_DISPATCH" || { rm -f "$tmp"; return 1; }
+  # Never truncate a dispatcher another cron/install process is executing.
+  local dispatch_stage
+  dispatch_stage="$(${SUDO} mktemp "${NX_ACME_DISPATCH}.stage.XXXXXX")" || { rm -f "$tmp"; return 1; }
+  if ! ${SUDO} install -o root -g root -m 0700 "$tmp" "$dispatch_stage" ||
+     ! ${SUDO} mv -fT -- "$dispatch_stage" "$NX_ACME_DISPATCH"; then
+    ${SUDO} rm -f -- "$dispatch_stage"
+    rm -f "$tmp"
+    return 1
+  fi
   rm -f "$tmp"
 }
 
-nx_acme_privileged_cron() {
+# shellcheck disable=SC2031
+nx_acme_privileged_cron() (
+  local scheduler_fd
+  exec {scheduler_fd}<"$SSL_DIR" || return 1
+  [[ ${NX_ACME_SCHEDULER_HELD:-0} == 1 || ${NX_ACME_LOCK_HELD:-0} == 1 ]] || flock -x "$scheduler_fd" || return 1
   local mode="$1" current updated
   nx_acme_privileged_paths
   command -v crontab >/dev/null 2>&1 || { error "ACME 续期需要 crontab。"; return 1; }
@@ -1167,7 +1250,7 @@ for line in sys.stdin.read().splitlines():
 if mode=="enable": print("0 3 * * * "+shlex.quote(path)+" cron")
 ' "$NX_ACME_DISPATCH" "$mode")" || return 1
   printf '%s\n' "$updated" | ${SUDO} crontab -
-}
+)
 
 nx_acme_prepare_webroot() {
   [[ $EUID -ne 0 ]] || return 0

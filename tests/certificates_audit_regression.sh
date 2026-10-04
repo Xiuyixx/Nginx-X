@@ -40,6 +40,11 @@ nx_acme_prepare_dispatch() {
   nx_acme_privileged_paths
   cat > "$NX_ACME_DISPATCH" <<DISPATCH
 #!/bin/bash
+if [[ \$1 == install ]]; then
+ mkdir -p "$HOME/.acme.sh/nginxx-deploy/example.com"
+ "$HOME/.acme.sh/acme.sh" --install-cert -d example.com \$(test ! -d "$HOME/.acme.sh/example.com_ecc" || echo --ecc) --key-file "$HOME/.acme.sh/nginxx-deploy/example.com/privkey.pem" --fullchain-file "$HOME/.acme.sh/nginxx-deploy/example.com/fullchain.pem" --reloadcmd ':' || exit \$?
+ printf 'example.com\n' > "$root/manifest"
+fi
 mkdir -p "$SSL_DIR/example.com"
 cp "$HOME/.acme.sh/nginxx-deploy/example.com/"*.pem "$SSL_DIR/example.com/"
 DISPATCH

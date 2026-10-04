@@ -88,10 +88,7 @@ cat > "$CONF_DIR/nginx_status.conf.bak" <<'EOF'
 # managed_by=Nginx-X
 server { listen 127.0.0.1:80; }
 EOF
-cat > "$CONF_DIR/acme-challenge-example.conf.bak" <<'EOF'
-# managed_by=Nginx-X
-server { listen 80; }
-EOF
+nx_acme_render_helper example > "$CONF_DIR/acme-challenge-example.conf.bak"
 managed_list="$(list_managed_conf_files 1)"
 if grep -Eq '00-websocket-map\.conf|nginx_status\.conf|acme-challenge-example\.conf' <<<"$managed_list"; then
   echo "internal helper config leaked into managed config list" >&2

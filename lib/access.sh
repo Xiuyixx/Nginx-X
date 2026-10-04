@@ -44,9 +44,14 @@ nx_access_error() { error "访问策略：$*" >&2; return 1; }
 # scan output: server-index|socket|ssl|default|names
 nx_access_parse() {
   local file="$1" mode="${2:-scan}" strict="${3:-0}" defaults="${4:-}"
-  local clean rc=0
-  clean="$(mktemp)" || return 1
-  nx_conf_query strip-access "$file" > "$clean" || { rm -f "$clean"; return 1; }
+  local clean rc=0 owned=0
+  if [[ "${5:-}" == prepared ]]; then
+    clean="$file"
+  else
+    clean="$(mktemp)" || return 1
+    owned=1
+    nx_conf_query strip-access "$file" > "$clean" || { rm -f "$clean"; return 1; }
+  fi
   awk -v mode="$mode" -v strict="$strict" -v defaults="$defaults" '
   function fail(s) { print "access policy: " FILENAME ": " s > "/dev/stderr"; bad=1; exit 1 }
   function ipv6(s, halves,l,r,nl,nr,i,out,a,b,parts,best,start,len,bestlen) {
@@ -166,7 +171,7 @@ nx_access_parse() {
     }
     for(pos=1;pos<=length(text);pos++) printf "%s%s", insertion[pos], substr(text,pos,1)
   }' "$clean" || rc=$?
-  rm -f "$clean"
+  if (( owned )); then rm -f "$clean"; fi
   return "$rc"
 }
 
@@ -187,15 +192,27 @@ nx_access_metadata() {
   rm -f "$tmp"
 }
 
+# A successful setter must address a site that the derived-policy pass owns.
+# This also rejects real helpers/unmanaged files instead of metadata-only success.
+nx_access_assert_managed_site() {
+  local file
+  while IFS= read -r file; do
+    [[ "$file" == "$1" ]] && return 0
+  done < <(list_managed_conf_files 1)
+  nx_access_error "目标未纳入受管站点同步：$1"
+}
+
 nx_access_set_policy_files() {
   case "$2" in inherit|strict|open) ;; *) return 1;; esac
   nx_conf_path_allowed "$1" || return 1
+  nx_access_assert_managed_site "$1" || return 1
   nx_access_metadata "$1" access_policy "$2"
 }
 nx_access_set_policy() { nx_transaction nx_access_set_policy_files "$@"; }
 nx_access_set_default_files() {
   [[ "$2" != *$'\n'* && "$2" != *$'\r'* ]] || return 1
   nx_conf_path_allowed "$1" || return 1
+  nx_access_assert_managed_site "$1" || return 1
   nx_access_metadata "$1" access_default "$2"
 }
 nx_access_set_default() { nx_transaction nx_access_set_default_files "$@"; }
@@ -205,19 +222,29 @@ nx_access_set_default() { nx_transaction nx_access_set_default_files "$@"; }
 nx_access_sync_files() {
   local stage file policy defaults name rows socket ssl def _server _names line
   local -A required=() tls=() plain=() occupied=() managed=()
-  local -a files=()
+  local -a files=() metadata=()
+  local index=0 inherited=open
   stage="$(mktemp -d)" || return 1
   mapfile -t files < <(list_managed_conf_files 0)
+  domain_only_state_is_enabled && inherited=strict
+  if ((${#files[@]})); then
+    nx_conf_query policy-batch "${files[0]}" "$stage" "${files[@]:1}" || { rm -rf "$stage"; return 1; }
+  fi
   for file in "${files[@]}"; do
     [[ ! -L "$file" ]] || { rm -rf "$stage"; nx_access_error "不修改符号链接 $file"; return 1; }
     nx_assert_single_link "$file" || { rm -rf "$stage"; return 1; }
     name="$(basename "$file")"; managed["$file"]=1
-    policy="$(nx_access_site_policy "$file")" || { rm -rf "$stage"; return 1; }
-    defaults="$(conf_meta_get "$file" access_default)" || { rm -rf "$stage"; return 1; }
-    if ! nx_access_parse "$file" transform "$([[ "$policy" == strict ]] && echo 1 || echo 0)" "$defaults" > "$stage/$name"; then rm -rf "$stage"; return 1; fi
+    mapfile -t metadata < "$stage/$index.meta"
+    policy="${metadata[0]}"; defaults="${metadata[1]}"
+    case "$policy" in
+      ''|inherit) policy="$inherited" ;;
+      strict|open) ;;
+      *) rm -rf "$stage"; nx_access_error "无效 access_policy: $policy"; return 1 ;;
+    esac
+    if ! nx_access_parse "$stage/$index.clean" transform "$([[ "$policy" == strict ]] && echo 1 || echo 0)" "$defaults" prepared > "$stage/$name"; then rm -rf "$stage"; return 1; fi
     # Scan the generated default flags (strip marker comment, not flag).
     sed 's/ # nx-access-default//' "$stage/$name" > "$stage/scan" || { rm -rf "$stage"; return 1; }
-    rows="$(nx_access_parse "$stage/scan")" || { rm -rf "$stage"; return 1; }
+    rows="$(nx_access_parse "$stage/scan" scan 0 '' prepared)" || { rm -rf "$stage"; return 1; }
     while IFS='|' read -r _server socket ssl def _names; do
       [[ -n "$socket" ]] || continue
       [[ "$policy" == strict ]] && required["$socket"]=1
@@ -227,6 +254,7 @@ nx_access_sync_files() {
         occupied["$socket"]="$file"
       fi
     done <<< "$rows"
+    index=$((index+1))
   done
   # Existing default servers, including unmanaged sites, own exactly their socket.
   for file in "$CONF_DIR"/*.conf; do

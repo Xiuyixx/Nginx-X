@@ -229,6 +229,10 @@ try:
                 node = returns[0]
                 edits.append((node['start'], node['end'], 'location / { ' + text[node['start']:node['end']] + ' }'))
             challenge = [n for n in server['children'] if n['args'] == ['location', '^~', '/.well-known/acme-challenge/']]
+            if challenge:
+                expected = [['root', '/usr/share/nginx/html'], ['default_type', '"text/plain"'], ['try_files', '$uri', '=404']]
+                if len(challenge) != 1 or challenge[0]['children'] is None or [n['args'] for n in challenge[0]['children']] != expected or any(n['children'] is not None for n in challenge[0]['children']):
+                    fail('unknown challenge block requires manual review; business routing left unchanged')
             if not challenge:
                 if any('/.well-known/acme-challenge' in ' '.join(n['args']) for n in server['children']):
                     fail('custom challenge location requires manual review')
