@@ -6,6 +6,9 @@ source "$(dirname "${BASH_SOURCE[0]}")/fixtures/test-environment.sh"
 cd "$(dirname "$0")/.."
 source ./nx.sh
 SUDO=''
+# Alpine has /etc/nginx/http.d even in disposable containers. Keep package
+# include-dir autodetection inside this fixture instead of the container tree.
+eval "$(declare -f install_nginx_official | sed 's@/etc/nginx/http.d@'"$CONF_DIR"'@g')"
 root=$(mktemp -d)
 trap 'rm -rf "$root"; nx_test_cleanup' EXIT
 fail(){ echo "FAIL: $*" >&2; exit 1; }
