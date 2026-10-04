@@ -6,6 +6,9 @@ if [[ "${1:-}" != --isolated ]]; then
   if [[ $EUID != 0 ]] || ! command -v unshare >/dev/null || ! command -v ip >/dev/null; then
     echo 'SKIP: policy audit requires root, unshare and ip for private namespaces'; exit 0
   fi
+  if ! unshare --mount --net --fork true 2>/dev/null; then
+    echo 'SKIP: private mount/network namespaces unavailable (container capabilities)'; exit 0
+  fi
   NGINX_BIN="${NGINX_BIN:-$(command -v nginx || true)}"
   [[ -x "$NGINX_BIN" ]] || { echo 'SKIP: set NGINX_BIN'; exit 0; }
   COPY="$(mktemp -d /tmp/nginxx-policy-copy-XXXXXX)"
