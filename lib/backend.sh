@@ -37,6 +37,7 @@ nx_backend_uninstall_guard() {
 }
 
 _nx_backend_engine() {
+  # shellcheck disable=SC2030,SC2031 # dynamic caller context lives in transaction subshell
   # Paths are passed as data, never evaluated. Overrides are restricted inside
   # Python to a distinct network namespace (including read-only test fixtures).
   local held=0
