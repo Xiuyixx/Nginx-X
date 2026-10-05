@@ -31,7 +31,7 @@ jobs:
             apt-get update
             apt-get install -y bash util-linux python3 curl coreutils findutils ca-certificates
             mkdir -p /probe/usr/sbin
-            (cd /probe && apt-get download nftables libnftables1 libnftnl11 libedit2 libjansson4 libmnl0 libxtables12 libbsd0 libtinfo6 libgmp10)
+            (cd /probe && apt-get download nftables libnftables1 libnftnl11 libedit2 libjansson4 libmnl0 libxtables12 libbsd0 libmd0 libtinfo6 libgmp10)
             for deb in /probe/*.deb; do dpkg-deb -x "$deb" /probe; done
             LD_LIBRARY_PATH=/probe/usr/lib/x86_64-linux-gnu:/probe/lib/x86_64-linux-gnu /probe/usr/sbin/nft --version
             # The test starts with nft/ss absent, then installs them through the real apt path.

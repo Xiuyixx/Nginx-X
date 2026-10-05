@@ -60,7 +60,11 @@ done
 case "$manager" in
  apt) apt-get -o "Dir::Cache::archives=$scratch/cache" -o Dpkg::Options::=--force-confold install -y --no-download --no-install-recommends "$@" ;;
  dnf|yum) "$manager" --cacheonly install -y "$@" ;;
- apk) apk --no-network add "$scratch/cache"/*.apk ;;
+ apk)
+  apk --no-network add --virtual .nginxx-backend-install "$scratch/cache"/*.apk
+  apk --no-network add "$@"
+  apk --no-network del .nginxx-backend-install
+  ;;
 esac
 NXISOLATED
 NXPACKAGES
