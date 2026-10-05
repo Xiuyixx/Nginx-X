@@ -165,7 +165,9 @@ has_local_nx() {
   [[ -f "${script_dir}/nx.sh" ]]
 }
 
-if [[ "${BASH_SOURCE[0]}" != "$0" ]]; then return 0; fi
+# BASH_SOURCE[0] is unset for `bash -c`/stdin execution under `set -u`.
+# An empty source marker means this is an executable entry, not a source call.
+if [[ -n "${BASH_SOURCE[0]-}" && "${BASH_SOURCE[0]-}" != "$0" ]]; then return 0; fi
 
 for arg in "$@"; do
   case "$arg" in
