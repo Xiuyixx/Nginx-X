@@ -1,35 +1,39 @@
-## 2026-10-05 — HTTP/2 跨版本语法适配
+# Changelog
+
+---
+
+## [3.2.0] - 2026-10-05
+
+### Changed
+- 项目版本同步至 3.2.0，涵盖流式反代、后端直连保护、独立更新交接及以下功能和修复；菜单标题只显示 `Nginx-X v3.2.0`，不附日期。
+- 新增源码与安装 bundle 的纯数字语义版本、标题无日期及文档版本一致性回归；历史版本记录保留日期。
+
+### HTTP/2 跨版本语法适配
 
 - HTTPS 模板与保留式转换统一按实际 Nginx 数字版本能力选择语法：≥1.25.1 在 TLS server 使用独立 `http2 on;`，旧版保留 IPv4/IPv6 `listen ... ssl http2;`，不禁用 HTTP/2。
 - 版本异常、命令失败或不存在时记录保守回退；显式 `http2 on/off`、自定义配置及导入保留，不自动改写存量站点。已有站点需“修改”重建或 HTTPS 关闭/重新启用；重复启用仅迁移统一监听的纳管旧式 TLS 配置。
 - 新增阈值/异常解析、模板/转换/禁用/显式决策跨版本往返及真实 Nginx 无 warning、ALPN h2、HTTP/2 wire request 回归，原事务回滚继续覆盖。
 
-## 2026-10-05 — 安装/更新自动补齐后端工具
+### 安装/更新自动补齐后端工具
 
 - 安装器（包括 `--no-run`）、已有更新及菜单初始化幂等检测 nft/ss；apt/apk 映射 nftables/iproute2，dnf/yum 映射 nftables/iproute，仅装缺失工具对应包。
 - 下载后在私有 mount/network/PID/proc 和 /run 中执行 package hooks，隔离系统服务调用及规则，绝不启动/启用/重载系统 nftables 服务，不覆盖 policy-rc.d 或管理员 nft 配置；不能隔离时明确拒绝，失败不假成功或卸载已有工具。
 - 安装工具不自动启用保护；Linux + 运行中 systemd 和既有安全拒绝条件不变。OpenWrt/opkg 不猜测后端包名，不安装/切换 init。
 - 新增源码/bundle/纯 source/help、缺失映射与失败回归，以及 disposable rootfs 真实 apt 包安装前后哨兵规则与服务抑制验证。
 
-## 2026-10-05 — 简化仅域名访问与组合保护
+### 简化仅域名访问与组合保护
 
 - 主菜单收敛为 1 开启 / 2 关闭 / 3 高级设置 / 0 返回；默认入口与独立保护放入高级设置。
 - 一次确认组合严格入口和本机后端保护；配置锁内协调引用、规则与重载，失败恢复两层快照，保留共享引用。
 - 真实配置/nft 状态区分完整开启、仅 Nginx 入口、关闭与异常。已有 strict-only 升级不自动改防火墙，选择 1 补齐；不支持组合时明确失败，可高级仅限制 Nginx。
 - 真实主菜单网络回归验证 IPv4/IPv6、pre-DNAT、共享关闭、重复开启/修复及跨步骤失败；不声称隐藏 IP、实际 Docker 或系统重启已实证。
 
-## 2026-10-05 — 显式可选后端直连保护
+### 显式可选后端直连保护
 
 - 仅域名访问菜单新增独立后端保护启用/关闭与状态；不会因更新、诊断或 strict 开关静默写防火墙。
 - nftables 专有 inet pre-DNAT 规则保护已核验本机 TCP 后端，保留回环，支持双栈；共享端口引用计数。
 - root-owned 独立启动回放与失败恢复；受保护站点修改/停用/删除及卸载先明确拒绝，避免半成功和误解封。
 - 新增一次性 namespace/rootfs 真实网络 CI；覆盖原生 INPUT、模拟 Docker DNAT、共享端口、失败回滚与启动规则回放。实际 Docker daemon/systemd reboot 尚未实测；不支持的平台明确拒绝。
-
-# Changelog
-
----
-
-## Unreleased
 
 ### Added
 - 内部 2) / 外部 6) 流式反代，面向 CPA / CLIProxyAPI / AI API / SSE；业务 location 仅增加 `proxy_buffering off` 与 `proxy_cache off`，不影响 ACME 或既有媒体模式。

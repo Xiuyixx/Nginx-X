@@ -2,6 +2,8 @@
 
 一个基于 Bash 的 Nginx 自动化管理交互脚本（Ubuntu / Debian / CentOS / Alpine / OpenWrt）。
 
+当前版本：**3.2.0**。菜单标题为 `Nginx-X v3.2.0`，不附日期。已有安装选择主菜单 **5) 更新脚本**，完成更新并进入新版后即可看到新标题；版本号随项目功能变更维护，不在启动时查询 Git 或生成日期。
+
 ## HTTP/2 配置兼容
 
 HTTPS 新建和保留式转换共用实际 Nginx 版本检测（`NGINX_BIN` 可指定二进制，默认 PATH 中的 `nginx -v`）：官方 **1.25.1 起**使用 TLS server 内的 `http2 on;`，IPv4/IPv6 `listen` 只保留 `ssl`；旧版（包括 1.18/1.22）仍使用 `listen ... ssl http2;`，不会删除或禁用 HTTP/2。版本未知、异常或命令失败时记录提示并保守使用旧语法；`nginx -t` 的弃用 warning 本身不是失败，实际校验/重载失败仍回滚。需安装带 HTTP/2 模块的 Nginx。
