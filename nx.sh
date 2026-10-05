@@ -2430,16 +2430,16 @@ domain_only_warn_exposed_ports() {
   done < <(domain_only_list_exposed_ports)
   (( ${#exposed[@]} )) || return 0
 
-  warn "检测到以下端口由 Nginx 之外的服务直接对外监听，仅域名访问无法拦截它们："
+  warn "检测到以下非 Nginx 入口端口存在非回环监听，可能绕过仅域名访问（防火墙及外网可达性未知）："
   for x in ${exposed[@]+"${exposed[@]}"}; do
     pname="$(domain_only_port_process "$x")"
     if [[ -n "$pname" ]]; then
-      warn "  端口 ${x}（${pname}）仍可用 IP:端口 访问"
+      warn "  端口 ${x}（${pname}）可能被 IP:端口 直连"
     else
-      warn "  端口 ${x} 仍可用 IP:端口 访问"
+      warn "  端口 ${x} 可能被 IP:端口 直连"
     fi
   done
-  warn "如需隐藏这些端口，请在对应服务（如 Docker）中改为仅监听 127.0.0.1，或用防火墙限制来源。"
+  warn "如需限制直连，请自行将后端绑定 127.0.0.1 或用防火墙限制来源，并保留 Nginx 可访问后端。"
 }
 
 cert_menu() {

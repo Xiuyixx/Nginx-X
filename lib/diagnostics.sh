@@ -67,6 +67,92 @@ health_probe_label() {
   esac
 }
 
+# Return only normalized local TCP endpoints, never process arguments. A failed
+# tool falls through; /proc requires both address families to avoid false safety.
+health_tcp_listeners() {
+  local table parsed
+  if check_cmd ss && table="$(ss -lnt 2>/dev/null)"; then
+    if parsed="$(printf '%s\n' "$table" | awk '
+      $1=="State" {valid=1;next}
+      $1=="LISTEN" && NF>=5 {valid=1;print $4;next}
+      NF {bad=1}
+      END {if(!valid || bad)exit 1}')"; then
+      printf '%s\n' "$parsed"; return 0
+    fi
+  fi
+  if check_cmd netstat && table="$(netstat -lnt 2>/dev/null)"; then
+    if parsed="$(printf '%s\n' "$table" | awk '
+      /^Active Internet/ || $1=="Proto" {valid=1;next}
+      $1~/^tcp/ && $6=="LISTEN" && NF>=6 {valid=1;print $4;next}
+      NF {bad=1}
+      END {if(!valid || bad)exit 1}')"; then
+      printf '%s\n' "$parsed"; return 0
+    fi
+  fi
+  python3 - 2>/dev/null <<'PYLISTEN'
+import ipaddress, pathlib, sys
+try:
+    endpoints = []
+    for filename, width in (("/proc/net/tcp", 4), ("/proc/net/tcp6", 16)):
+        for line in pathlib.Path(filename).read_text().splitlines()[1:]:
+            fields = line.split()
+            if fields[3] != "0A": continue
+            host, port = fields[1].split(":")
+            raw = bytes.fromhex(host)
+            if len(raw) != width: raise ValueError()
+            # proc represents each 32-bit word in native byte order.
+            raw = b"".join(int.from_bytes(raw[i:i+4], sys.byteorder).to_bytes(4, 'big')
+                           for i in range(0, width, 4))
+            addr = str(ipaddress.ip_address(raw))
+            endpoints.append(("[" + addr + "]" if width == 16 else addr) + ":" + str(int(port, 16)))
+    print("\n".join(endpoints))
+except Exception:
+    sys.exit(1)
+PYLISTEN
+}
+
+# Inspect only the known internal template backend, not arbitrary external URLs
+# or container namespace mappings. Output contains a validated port, no URLs.
+health_backend_listener_notice() {
+  local file="$1" backend proxy table result
+  backend="$(conf_meta_get "$file" backend_port)" || return 0
+  [[ "$backend" =~ ^[0-9]{1,5}$ ]] || return 0
+  (( 10#$backend > 0 && 10#$backend <= 65535 )) || return 0
+  backend="$((10#$backend))"
+  proxy="$(extract_proxy_pass "$file")" || return 0
+  [[ "$proxy" == "http://127.0.0.1:${backend}" ]] || return 0
+  if ! table="$(health_tcp_listeners)"; then
+    echo "  后端监听 ${backend}: 未知（无法查询本机 TCP 监听；未判断外网可达性）"
+    return 0
+  fi
+  result="$(printf '%s\n' "$table" | python3 -c '
+import ipaddress, sys
+port = int(sys.argv[1]); found = False; risky = False
+try:
+    for line in sys.stdin:
+        if not line.strip(): continue
+        host, number = line.strip().rsplit(":", 1)
+        if int(number) != port: continue
+        found = True
+        host = host.strip("[]")
+        if host == "*": risky = True; continue
+        addr = ipaddress.ip_address(host)
+        if not (addr.is_loopback or (getattr(addr, "ipv4_mapped", None) and addr.ipv4_mapped.is_loopback)):
+            risky = True
+    print("risk" if risky else "loopback" if found else "absent")
+except Exception:
+    print("unknown")
+' "$backend" 2>/dev/null)" || result=unknown
+  case "$result" in
+    risk)
+      echo "  后端监听风险 ${backend}: 存在通配/非回环 TCP 监听，可能通过 IP:端口 绕过 Nginx。"
+      echo '  仅域名访问不拦截后端直连；防火墙及外网可达性未知。请自行限制后端监听或来源，保留 Nginx 可访问后端。' ;;
+    loopback) echo "  后端监听 ${backend}: 仅回环（本机所见；未检查容器映射或防火墙）" ;;
+    absent) echo "  后端监听 ${backend}: 未发现（本机所见；外网可达性未知）" ;;
+    *) echo "  后端监听 ${backend}: 未知（无法识别监听信息；未判断外网可达性）" ;;
+  esac
+}
+
 health_check_conf_file() {
   local conf_file="$1"
   local domain listen_port mode upstream_url stream_upstream_url stream_upstream_urls
@@ -189,6 +275,7 @@ health_check_conf_file() {
     fi
   else
     echo "  后端端口: $(conf_meta_get "$conf_file" backend_port)"
+    health_backend_listener_notice "$conf_file"
   fi
   echo
 

@@ -330,6 +330,7 @@ nx_access_global_files() {
 domain_only_enable() {
   nx_transaction nx_access_global_files 1 || return 1
   info '全局继承策略已设为严格域名校验（Host；TLS 同时校验 SNI）。'
+  nx_access_scope_notice
   domain_only_warn_exposed_ports
 }
 domain_only_disable() { nx_transaction nx_access_global_files 0; }
@@ -338,6 +339,10 @@ domain_only_sync() { nx_transaction nx_access_noop; }
 domain_only_rebuild_if_enabled() { domain_only_sync; }
 # apply_conf_with_rollback already syncs within its transaction.
 domain_only_after_apply() { :; }
+
+nx_access_scope_notice() {
+  echo '仅约束 Nginx 入口，不拦截后端服务的直连端口；不是鉴权，也不会隐藏公网 IP。'
+}
 
 nx_site_access_menu() {
   local file="$1" c policy
@@ -349,10 +354,13 @@ nx_site_access_menu() {
   echo '2) 关闭仅域名访问'
   echo '3) 管理本站默认访问入口'
   echo '0) 返回'
-  echo '开启后只接受本站域名；关闭不会自动将 IP 请求分配给本站。'
+  echo '开启后 Nginx 入口只接受本站域名；关闭不会自动将 IP 请求分配给本站。'
+  nx_access_scope_notice
   read -rp '请选择: ' c || return 1
   case "$c" in
-    1) nx_access_set_policy "$file" strict ;;
+    1) nx_access_set_policy "$file" strict || return 1
+       info '本站 Nginx 入口已开启严格域名校验。'
+       nx_access_scope_notice ;;
     2) nx_access_set_policy "$file" open ;;
     3) nx_default_site_menu "$file" ;;
     0) return 0 ;;
