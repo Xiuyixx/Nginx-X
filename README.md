@@ -2,6 +2,14 @@
 
 一个基于 Bash 的 Nginx 自动化管理交互脚本（Ubuntu / Debian / CentOS / Alpine / OpenWrt）。
 
+## HTTP/2 配置兼容
+
+HTTPS 新建和保留式转换共用实际 Nginx 版本检测（`NGINX_BIN` 可指定二进制，默认 PATH 中的 `nginx -v`）：官方 **1.25.1 起**使用 TLS server 内的 `http2 on;`，IPv4/IPv6 `listen` 只保留 `ssl`；旧版（包括 1.18/1.22）仍使用 `listen ... ssl http2;`，不会删除或禁用 HTTP/2。版本未知、异常或命令失败时记录提示并保守使用旧语法；`nginx -t` 的弃用 warning 本身不是失败，实际校验/重载失败仍回滚。需安装带 HTTP/2 模块的 Nginx。
+
+**只更新脚本不会自动改写现有站点。** 已有纳管站点可通过“修改”重建 HTTPS 配置，或关闭后重新启用 HTTPS（关闭期间会恢复 HTTP，请安排维护窗口）获得版本适配。重复启用只迁移统一旧式监听的显式纳管 TLS server；已有 `http2 on/off` 决策及复杂自定义配置不盲改，导入也不强制重建。修改保留已有显式 HTTP/2 决策（重建到旧版时将 `on` 转成 listen 参数、`off` 保持不启用）；复杂 include/混合监听会拒绝而非猜测。全局 `http` 上下文的自定义 HTTP/2 继承不由脚本改写。降级 Nginx 前请人工检查已有新式指令，更新脚本不会自动迁移存量配置以适配降级。
+
+官方指令说明：<https://nginx.org/en/docs/http/ngx_http_v2_module.html#http2>（1.25.1 引入；`listen http2` 同时弃用）。
+
 ## 项目目标
 
 通过数字菜单统一管理 Nginx，重点保证稳定性：

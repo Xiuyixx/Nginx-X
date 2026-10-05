@@ -5,10 +5,11 @@
 
 nx_https_transform() {
   command -v python3 >/dev/null 2>&1 || { error "保留配置的 HTTPS 操作需要 python3。" >&2; return 1; }
-  local clean rc=0
+  local clean rc=0 http2_syntax
+  http2_syntax="$(nginx_http2_syntax)"
   clean="$(mktemp)" || return 1
   nx_conf_query strip-access "$2" > "$clean" || { rm -f "$clean"; return 1; }
-  NX_HTTPS_CLEAN_FILE="$clean" NX_HTTPS_CONF_DIR="${CONF_DIR:-}" python3 - "$@" <<'PY' || rc=$?
+  NX_HTTP2_SYNTAX="$http2_syntax" NX_HTTPS_CLEAN_FILE="$clean" NX_HTTPS_CONF_DIR="${CONF_DIR:-}" python3 - "$@" <<'PY' || rc=$?
 import re
 import sys
 import subprocess
@@ -197,6 +198,13 @@ try:
             if len(found) != 1 or found[0]['children'] is not None:
                 fail('expected one original ' + key)
             preserved[key] = found[0]
+        h2 = directives(old_app, 'http2')
+        if len(h2) > 1 or any(n['args'][0] == 'http2' and n not in old_app['children'] for n in walk(old_app)):
+            fail('ambiguous original HTTP/2 directives')
+        if h2:
+            if h2[0]['args'] not in (['http2', 'on'], ['http2', 'off']):
+                fail('unsupported original HTTP/2 directive')
+            preserved['http2'] = h2[0]
         # The very certificate we will publish must cover all candidate aliases.
         cert_token = preserved['ssl_certificate']['args'][1:]
         if len(cert_token) != 1:
@@ -261,13 +269,17 @@ try:
     if len({p[1] for p in parsed}) != 1 or len({'ssl' in p[2] for p in parsed}) != 1:
         fail('mixed listener ports or protocols are unsupported')
     tls = 'ssl' in parsed[0][2]
-    if any(n['args'][0].startswith('ssl_') and n not in app['children'] for n in walk(app)):
+    if any((n['args'][0].startswith('ssl_') or n['args'][0] == 'http2') and n not in app['children'] for n in walk(app)):
         fail('nested TLS directives are unsupported')
     def meta(key):
         values = metadata.get(key, [])
         if len(values) > 1:
             fail('duplicate metadata: ' + key)
         return values[0][2] if values else ''
+    h2 = directives(app, 'http2')
+    if len(h2) > 1 or any(n['args'] not in (['http2', 'on'], ['http2', 'off']) for n in h2):
+        fail('ambiguous HTTP/2 directives')
+    modern_h2 = os.environ['NX_HTTP2_SYNTAX'] == 'directive'
     edits = []
     # Move explicit managed default selections together with application sockets.
     default_sockets = meta('access_default')
@@ -353,6 +365,16 @@ try:
                     repaired = repaired[:node['start']] + 'location / { ' + text[node['start']:node['end']] + ' }' + repaired[node['end']:]
             if repaired != original_text and text != original_text:
                 fail('repair challenge redirect separately before enabling HTTPS')
+            # Only normalize known managed, uniform legacy TLS listeners.
+            # Explicit on/off and custom configurations remain untouched.
+            if modern_h2 and not h2 and meta('managed_by') == 'Nginx-X' and all('http2' in p[2] for p in parsed):
+                if repaired != original_text or text != original_text:
+                    fail('repair derived access/redirect configuration separately before HTTP/2 migration')
+                for node, (address, number, options) in zip(listens, parsed):
+                    replace(node, 'listen ' + ' '.join([address + number] + [o for o in options if o != 'http2']) + ';')
+                edits.append((app['opening'] + 1, app['opening'] + 1, '\n    http2 on;\n'))
+                for start, end, replacement in sorted(edits, reverse=True):
+                    repaired = repaired[:start] + replacement + repaired[end:]
             sys.stdout.write(repaired)
             sys.exit(0)
         if redirects or any(n['args'][0].startswith('ssl_') or n['args'][0] in ('ssl', 'http2') for n in walk(app)):
@@ -361,19 +383,28 @@ try:
         target = port(requested or meta('listen_port') or original)
         if target == '80':
             target = '443'
+        preserved_h2 = preserved.get('http2')
+        legacy_h2 = not modern_h2 and (preserved_h2 is None or preserved_h2['args'][1] == 'on')
         for node, (address, _, options) in zip(listens, parsed):
-            replace(node, 'listen ' + ' '.join([address + target] + options + ['ssl', 'http2']) + ';')
+            replace(node, 'listen ' + ' '.join([address + target] + [o for o in options if o != 'http2'] + ['ssl'] + (['http2'] if legacy_h2 else [])) + ';')
         certpath = ssl_dir.rstrip('/') + '/' + domain
         if re.search(r'[\s;{}\"\'\\$#]', certpath):
             fail('unsupported characters in certificate path')
         certs = '\n    ssl_certificate     ' + certpath + '/fullchain.pem;\n    ssl_certificate_key ' + certpath + '/privkey.pem;\n    ssl_protocols TLSv1.2 TLSv1.3;\n'
         if preserved:
-            certs = '\n    ' + '\n    '.join(old_text[n['start']:n['end']] for n in preserved.values()) + '\n'
+            # http2 is a syntax-bearing protocol switch, not a certificate
+            # directive. Translate it across the 1.25.1 boundary rather than
+            # copying a directive that the target Nginx cannot parse.
+            preserved_certs = [n for key, n in preserved.items()
+                               if key != 'http2' or modern_h2]
+            certs = '\n    ' + '\n    '.join(old_text[n['start']:n['end']] for n in preserved_certs) + '\n'
         edits.append((app['opening'] + 1, app['opening'] + 1, certs))
+        if modern_h2 and 'http2' not in preserved:
+            edits.append((app['opening'] + 1, app['opening'] + 1, '\n    http2 on;\n'))
         # Retain exactly the existing listener families and bindings on redirect port 80.
         redirect_listens = []
         for address, _, options in parsed:
-            redirect_listens.append('    listen ' + ' '.join([address + '80'] + options) + ';')
+            redirect_listens.append('    listen ' + ' '.join([address + '80'] + [o for o in options if o != 'http2']) + ';')
         suffix = '' if target == '443' else ':' + target
         block = 'server {\n' + '\n'.join(redirect_listens) + '\n    server_name ' + ' '.join(aliases) + ';\n'
         block += '    location ^~ /.well-known/acme-challenge/ {\n        root /usr/share/nginx/html;\n        default_type "text/plain";\n        try_files $uri =404;\n    }\n'

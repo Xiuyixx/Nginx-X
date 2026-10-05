@@ -1,5 +1,25 @@
 #!/usr/bin/env bash
 # Nginx-X configuration templates; sourced by nx.sh.
+# http2 appeared in server/http context in upstream Nginx 1.25.1.
+# Probe each operation (no stale cache after package upgrades). Unknown versions
+# retain the old listen syntax; diagnostics go to stderr, never into a template.
+nginx_http2_syntax() {
+  local output major minor patch
+  if output="$("${NGINX_BIN:-nginx}" -v 2>&1)" &&
+     [[ "$output" =~ ^nginx\ version:\ nginx/([0-9]+)\.([0-9]+)\.([0-9]+)([[:space:]].*)?$ ]]; then
+    major="${BASH_REMATCH[1]}" minor="${BASH_REMATCH[2]}" patch="${BASH_REMATCH[3]}"
+    # Limit numeric components before arithmetic (malformed/overflow versions).
+    if (( ${#major} <= 4 && ${#minor} <= 4 && ${#patch} <= 4 )); then
+      if (( 10#$major > 1 || (10#$major == 1 && (10#$minor > 25 || (10#$minor == 25 && 10#$patch >= 1))) )); then
+        echo directive; return
+      fi
+      echo listen; return
+    fi
+  fi
+  printf '%s\n' 'Nginx-X: 无法确定 Nginx HTTP/2 指令能力，保守保留 listen ... http2 语法。' >&2
+  echo listen
+}
+
 build_proxy_conf() {
   local domain="$1"
   local listen_port="$2"
@@ -265,9 +285,12 @@ ${main_header_block}"
   fi
 
   if [[ "$https_enabled" == "1" ]]; then
-    local ipv6_listen_80 ipv6_listen_tls
+    local ipv6_listen_80 ipv6_listen_tls tls_options="ssl http2" http2_directive=""
+    if [[ "$(nginx_http2_syntax)" == directive ]]; then
+      tls_options="ssl" http2_directive="    http2 on;"
+    fi
     ipv6_listen_80="$(nginx_listen_ipv6_line 80 "")"
-    ipv6_listen_tls="$(nginx_listen_ipv6_line "$listen_port" "ssl http2")"
+    ipv6_listen_tls="$(nginx_listen_ipv6_line "$listen_port" "$tls_options")"
 
     cat > "$out" <<EOF
 # managed_by=Nginx-X
@@ -298,8 +321,9 @@ ${ipv6_listen_80}
 }
 
 server {
-    listen ${listen_port} ssl http2;
+    listen ${listen_port} ${tls_options};
 ${ipv6_listen_tls}
+${http2_directive}
     server_name ${domain};
 
 ${https_cert_block}

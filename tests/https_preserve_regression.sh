@@ -7,6 +7,7 @@ REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 source "$REPO_DIR/nx.sh"
 # shellcheck disable=SC1091
 source "$REPO_DIR/lib/https.sh"
+nginx_http2_syntax() { echo listen; }
 # Fixtures belong to the test user; only nginx -t may require elevation.
 # shellcheck disable=SC2034
 SUDO=""

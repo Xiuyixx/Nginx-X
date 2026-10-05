@@ -1,3 +1,9 @@
+## 2026-10-05 — HTTP/2 跨版本语法适配
+
+- HTTPS 模板与保留式转换统一按实际 Nginx 数字版本能力选择语法：≥1.25.1 在 TLS server 使用独立 `http2 on;`，旧版保留 IPv4/IPv6 `listen ... ssl http2;`，不禁用 HTTP/2。
+- 版本异常、命令失败或不存在时记录保守回退；显式 `http2 on/off`、自定义配置及导入保留，不自动改写存量站点。已有站点需“修改”重建或 HTTPS 关闭/重新启用；重复启用仅迁移统一监听的纳管旧式 TLS 配置。
+- 新增阈值/异常解析、模板/转换/禁用/显式决策跨版本往返及真实 Nginx 无 warning、ALPN h2、HTTP/2 wire request 回归，原事务回滚继续覆盖。
+
 ## 2026-10-05 — 安装/更新自动补齐后端工具
 
 - 安装器（包括 `--no-run`）、已有更新及菜单初始化幂等检测 nft/ss；apt/apk 映射 nftables/iproute2，dnf/yum 映射 nftables/iproute，仅装缺失工具对应包。

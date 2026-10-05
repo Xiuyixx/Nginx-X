@@ -34,6 +34,7 @@ export PATH="$MOCK_BIN:$PATH"
 
 # shellcheck disable=SC1091
 source nx.sh
+nginx_http2_syntax() { echo listen; }
 
 # Make the test deterministic: don't depend on the host kernel IPv6 state.
 ipv6_available() { return 0; }
