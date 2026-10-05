@@ -3,6 +3,8 @@
 # Directory-wide snapshots retain modes/owners and include disabled sites.
 # Callback contract: disk mutations only; shell variables stay in this subshell.
 # Callers must use the return status (and files for instrumentation), not counters.
+# Dynamic context is consumed only by functions called inside this subshell.
+# shellcheck disable=SC2030
 nx_transaction() (
   # Lock the directory inode itself: no writable lock file, symlink race, or
   # privileged shell redirection. Nginx configuration directories are readable
