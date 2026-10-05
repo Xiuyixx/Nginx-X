@@ -1146,8 +1146,10 @@ select_external_mode() {
     echo "3) Emby 分离 HTTP 推流" >&2
     echo "4) Emby 分离 HTTPS 推流" >&2
     echo "5) LilyEmby 方案（访问/推流分离）" >&2
+    echo "6) 流式反代（AI API / SSE）" >&2
+  else
+    echo "2) 流式反代（AI API / SSE）" >&2
   fi
-  echo "6) 流式反代（AI API / SSE）" >&2
 
   case "$current" in
     normal) choice="1" ;;
@@ -1159,12 +1161,20 @@ select_external_mode() {
     *) choice="1" ;;
   esac
 
-  read -rp "选择模式（内部 1/6，外部 1-6） (默认 ${choice}): " input_mode
-  [[ -n "$input_mode" ]] && choice="$input_mode"
-
-  if [[ "$scope" == "internal" && "$choice" != "6" ]]; then
-    choice="1"
+  if [[ "$scope" == "internal" ]]; then
+    [[ "$current" == "streaming" ]] && choice="2" || choice="1"
+    read -rp "选择模式（1-2） (默认 ${choice}): " input_mode
+    [[ -n "$input_mode" ]] && choice="$input_mode"
+    # Legacy 6 is an undisplayed alias; internal numbers never select media.
+    case "$choice" in
+      2|6) echo "streaming" ;;
+      *) echo "normal" ;;
+    esac
+    return
   fi
+
+  read -rp "选择模式（1-6） (默认 ${choice}): " input_mode
+  [[ -n "$input_mode" ]] && choice="$input_mode"
 
   case "$choice" in
     6) echo "streaming" ;;
