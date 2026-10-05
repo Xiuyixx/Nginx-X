@@ -84,6 +84,13 @@ install_local() {
     rm -f "$bundle"
     return 1
   fi
+  # --no-run suppresses the menu, not production dependency installation.
+  # shellcheck disable=SC2016 # $1 belongs to the privileged child shell
+  if ! ${SUDO} bash -c 'source "$1"; ensure_runtime_dependencies' _ "$bundle"; then
+    echo "[ERROR] 依赖安装失败；保留已有安装入口。" >&2
+    rm -f "$bundle"
+    return 1
+  fi
   stage="$(${SUDO} mktemp "${TARGET_BIN}.stage.XXXXXX")" || { rm -f "$bundle"; return 1; }
   if ! ${SUDO} install -m 0755 "$bundle" "$stage" || ! ${SUDO} mv -fT "$stage" "$TARGET_BIN"; then
     ${SUDO} rm -f "$stage"
@@ -158,9 +165,12 @@ has_local_nx() {
   [[ -f "${script_dir}/nx.sh" ]]
 }
 
+if [[ "${BASH_SOURCE[0]}" != "$0" ]]; then return 0; fi
+
 for arg in "$@"; do
   case "$arg" in
     --no-run) NO_RUN="1" ;;
+    --help|-h) echo "Usage: install.sh [--no-run] (installs missing runtime tools; --no-run skips menu only)"; exit 0 ;;
   esac
 done
 

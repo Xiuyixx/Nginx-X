@@ -23,6 +23,22 @@ jobs:
             mkdir -p /etc/nginx /etc/systemd/system /usr/local /var/lib /var/log
             NX_BACKEND_ISOLATED=1 NGINX_BIN=/usr/sbin/nginx bash tests/backend_protection_isolated.sh
           '
-      - name: Scope of boot proof
+      - name: Real package lifecycle proof in disposable Debian and Ubuntu rootfs
+        run: |
+          for image in debian:12 ubuntu:22.04 ubuntu:24.04; do
+          docker run --rm --privileged -v "$PWD:/project:ro" -w /project "$image" bash -ec '
+            export DEBIAN_FRONTEND=noninteractive
+            apt-get update
+            apt-get install -y bash util-linux python3 curl coreutils findutils ca-certificates
+            mkdir -p /probe/usr/sbin
+            (cd /probe && apt-get download nftables libnftables1 libnftnl11 libedit2 libjansson4 libmnl0 libxtables12 libbsd0 libtinfo6 libgmp10)
+            for deb in /probe/*.deb; do dpkg-deb -x "$deb" /probe; done
+            LD_LIBRARY_PATH=/probe/usr/lib/x86_64-linux-gnu:/probe/lib/x86_64-linux-gnu /probe/usr/sbin/nft --version
+            # The test starts with nft/ss absent, then installs them through the real apt path.
+            # The extracted nft is only a read-only probe for the pre-install sentinel.
+            NX_DEPENDENCIES_ISOLATED=1 NX_DEPENDENCIES_MANAGER=apt bash tests/backend_dependencies_isolated.sh
+          '
+          done
+      - name: Scope of boot and package proofs
         if: always()
-        run: echo 'Service-manager operations are recorded in the isolated rootfs; installed ExecStart executes real nft boot replay. Actual systemd reboot is not tested.'
+        run: echo 'All firewall package and boot checks run in disposable containers/namespaces; no host package, init, config, or firewall is modified. Actual host reboot/systemd is not tested.'

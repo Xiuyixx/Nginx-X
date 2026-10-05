@@ -1,3 +1,10 @@
+## 2026-10-05 — 安装/更新自动补齐后端工具
+
+- 安装器（包括 `--no-run`）、已有更新及菜单初始化幂等检测 nft/ss；apt/apk 映射 nftables/iproute2，dnf/yum 映射 nftables/iproute，仅装缺失工具对应包。
+- 下载后在私有 mount/network/PID/proc 和 /run 中执行 package hooks，隔离系统服务调用及规则，绝不启动/启用/重载系统 nftables 服务，不覆盖 policy-rc.d 或管理员 nft 配置；不能隔离时明确拒绝，失败不假成功或卸载已有工具。
+- 安装工具不自动启用保护；Linux + 运行中 systemd 和既有安全拒绝条件不变。OpenWrt/opkg 不猜测后端包名，不安装/切换 init。
+- 新增源码/bundle/纯 source/help、缺失映射与失败回归，以及 disposable rootfs 真实 apt 包安装前后哨兵规则与服务抑制验证。
+
 ## 2026-10-05 — 简化仅域名访问与组合保护
 
 - 主菜单收敛为 1 开启 / 2 关闭 / 3 高级设置 / 0 返回；默认入口与独立保护放入高级设置。

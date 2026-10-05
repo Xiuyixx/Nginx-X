@@ -93,23 +93,25 @@ ensure_runtime_dependencies() {
   for cmd in python3 curl openssl awk sed grep tar flock; do
     check_cmd "$cmd" || missing+=("$cmd")
   done
-  [[ ${#missing[@]} -gt 0 ]] || return 0
-  if [[ ${EUID:-$(id -u)} -ne 0 ]]; then
-    if ! check_cmd sudo || ! sudo -v; then
-      error "补齐依赖需要 sudo 权限：${missing[*]}"; return 1
-    fi
-  fi
   pkg="$(detect_pkg_mgr)"
-  case "$pkg" in
-    apt) ${SUDO} apt-get update && ${SUDO} apt-get install -y python3 curl openssl gawk sed grep tar util-linux ;;
-    dnf|yum) ${SUDO} "$pkg" install -y python3 curl openssl gawk sed grep tar util-linux ;;
-    apk) ${SUDO} apk add python3 curl openssl gawk sed grep tar util-linux ;;
-    opkg) ${SUDO} opkg update && ${SUDO} opkg install python3 curl openssl-util gawk sed grep tar flock ;;
-    *) error "请先安装依赖：${missing[*]}"; return 1 ;;
-  esac || return 1
-  for cmd in "${missing[@]}"; do
-    check_cmd "$cmd" || { error "依赖仍不可用：$cmd"; return 1; }
-  done
+  if [[ ${#missing[@]} -gt 0 ]]; then
+    if [[ ${EUID:-$(id -u)} -ne 0 ]]; then
+      if ! check_cmd sudo || ! sudo -v; then
+        error "补齐依赖需要 sudo 权限：${missing[*]}"; return 1
+      fi
+    fi
+    case "$pkg" in
+      apt) ${SUDO} apt-get update && ${SUDO} apt-get install -y python3 curl openssl gawk sed grep tar util-linux ;;
+      dnf|yum) ${SUDO} "$pkg" install -y python3 curl openssl gawk sed grep tar util-linux ;;
+      apk) ${SUDO} apk add python3 curl openssl gawk sed grep tar util-linux ;;
+      opkg) ${SUDO} opkg update && ${SUDO} opkg install python3 curl openssl-util gawk sed grep tar flock ;;
+      *) error "请先安装依赖：${missing[*]}"; return 1 ;;
+    esac || return 1
+    for cmd in "${missing[@]}"; do
+      check_cmd "$cmd" || { error "依赖仍不可用：$cmd"; return 1; }
+    done
+  fi
+  nx_ensure_backend_dependencies "$pkg"
 }
 
 installed_script_target() {
@@ -2791,7 +2793,7 @@ if [[ ! -r "${NX_LIB_DIR:-${SCRIPT_DIR}/lib}/transactions.sh" ]]; then
   fi
 fi
 NX_LIB_DIR="${NX_LIB_DIR:-${SCRIPT_DIR}/lib}"
-for nx_module in templates certificates transactions access https diagnostics backend; do
+for nx_module in dependencies templates certificates transactions access https diagnostics backend; do
   if [[ ! -r "${NX_LIB_DIR}/${nx_module}.sh" ]]; then
     error "缺少模块：${NX_LIB_DIR}/${nx_module}.sh，请重新运行 install.sh。"
     if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then exit 1; else return 1; fi
@@ -2802,5 +2804,8 @@ done
 unset nx_module
 
 if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
-  main
+  case "${1:-}" in
+    --help|-h) echo "Usage: nx (interactive Nginx-X manager)" ;;
+    *) main ;;
+  esac
 fi

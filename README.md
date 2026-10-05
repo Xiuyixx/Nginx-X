@@ -30,7 +30,7 @@ bash install.sh
 - 再次执行会自动拉取最新代码
 - 源码按 `lib/` 模块维护；安装器将全部模块打包为一个完整的 `nx` 可执行文件，更新时统一替换，模块单独变化也会被检测
 - 自定义安装路径：`TARGET_BIN="$HOME/.local/bin/nx" bash install.sh --no-run`
-- 配置解析和 HTTPS 开关需要 Python 3；启动时检查运行依赖，已有安装缺少依赖时会通过包管理器补齐（普通用户需要 sudo 权限）
+- 配置解析和 HTTPS 开关需要 Python 3；安装（包括 `--no-run`）、主菜单启动及原“更新脚本”流程检查并补齐运行工具（普通用户需要 sudo 权限）。已有 `nft`/`ss` 时不刷新软件源或重复安装
 - 如果安装目录已存在但不是 Git 仓库，安装器和更新器会停止并提示处理，不自动删除该目录
 - 若安装、拉取、依赖安装或软件源刷新失败，安装器会直接提示网络/软件源相关报错，不会静默中断
 - **多语言支持**：安装过程中根据系统 locale 自动切换中英文提示
@@ -127,13 +127,15 @@ CPA 安全部署建议：由用户自行将应用绑定 `127.0.0.1:8317`；同�
 
 ### 可选后端直连保护（显式启用）
 
+已有安装从 **5) 更新脚本** 升级即可：旧更新器拉取新的 `install.sh --no-run` 后，在替换入口前自动补工具；失败保留旧入口并提示原因。也可在原源码目录 `git pull --ff-only` 后运行 `bash install.sh --no-run`（自定义入口继续传原 `TARGET_BIN`）。`--no-run` 仅禁止进入交互菜单，不跳过依赖；source、build-bundle、`--help` 不安装包。依赖齐全不代表后端保护已开启或平台受支持。
+
 主菜单 **1) 开启** 经一次明确确认，同时启用严格 Nginx 入口和本机后端保护；两个步骤任一失败均尝试恢复原策略、默认入口元数据、配置字节、保护引用、自有 nft 规则及注册文件，不显示完整开启。**已有 strict-only 用户升级后仍保持原状，应选择 1 补齐保护**；完整开启重复选择 1 幂等，实际规则漂移可显式修复。更新、source、健康检查不自动改防火墙。
 
 主菜单 **2) 关闭** 先明确提示后端可能重新暴露公网，取消本站引用后解除 strict，保留其他共享站点引用；失败恢复两层设置。关闭不会自动将本站设为 IP 默认入口。主界面只显示完整开启、仅 Nginx 入口、关闭或异常，校验实际配置和 nft 状态，不将 strict-only 伪装成完整开启。
 
 **3) 高级设置** 保留：1 仅开启 Nginx 域名限制、2 修复/启用本机后端保护、3 解除本站后端引用、4 管理默认访问入口、0 返回。外部/静态站点及不支持的后端无法组合开启，明确失败并恢复原设置；可在高级设置确认仅 Nginx 限制，不宣称后端已保护。阻止浏览器 IP 访问不等于隐藏真实源站 IP，不做 CDN 配置。
 
-组合保护须以 root 启动脚本（例如 `sudo nx`），非 root 入口明确拒绝而不丢失 sudo 锁；strict-only 的关闭不依赖后端保护环境。首版只支持 **Linux + nftables + 运行中的 systemd**，管理员需自行安装 `nft`、`ss`。拒绝活动 UFW/firewalld/netfilter-persistent、未知或过早的 NAT 规则，不降级到仅 INPUT 或另一套 iptables。只接受活动纳管配置中所有实际代理目标均为静态 `http://127.0.0.1:端口`；外部、include、变量及复杂上游明确拒绝。核验真实 socket/进程及回环连接；22、sshd、Nginx 前端冲突、未知归属及无宿主监听（例如禁用 userland-proxy 的 Docker）拒绝，不猜测安全。
+组合保护须以 root 启动脚本（例如 `sudo nx`），非 root 入口明确拒绝而不丢失 sudo 锁；strict-only 的关闭不依赖后端保护环境。首版只支持 **Linux + nftables + 运行中的 systemd**，安装器自动检测 `nft`、`ss`：apt/apk 使用 `nftables` + `iproute2`，dnf/yum 使用 `nftables` + `iproute`；只装缺失工具对应的包。最终安装维护脚本在私有 mount/network/PID namespace 中运行（软件源刷新/下载仍遵循管理员的原生包管理器 hooks），隔离 `/run`、服务管理器调用及防火墙，保留管理员 nft 配置和已有规则；缺少 namespace 权限、APT 事务涉及 init helper 变更或安装失败则明确非零拒绝，不退回普通不安全安装。包失败可能留下部分安装/待配置状态，需按包管理器报错修复后重试；不承诺包级回滚。旧 yum 必须具备 downloadonly 插件，否则明确失败。**无需启动/启用系统 `nftables.service`**（其默认配置/停止动作可能 flush 其他规则）；保护仅使用 Nginx-X 自有服务，在用户显式确认时才注册和修改规则。Alpine/OpenWrt 默认 init 不满足保护条件；不会安装/切换 systemd。OpenWrt/opkg 不猜测 nft/ss 包名、不自动安装后端工具；只有 Nginx 管理功能仍受支持。拒绝活动 UFW/firewalld/netfilter-persistent、未知或过早的 NAT 规则，不降级到仅 INPUT 或另一套 iptables。只接受活动纳管配置中所有实际代理目标均为静态 `http://127.0.0.1:端口`；外部、include、变量及复杂上游明确拒绝。核验真实 socket/进程及回环连接；22、sshd、Nginx 前端冲突、未知归属及无宿主监听（例如禁用 userland-proxy 的 Docker）拒绝，不猜测安全。
 
 - 独立 `inet nginxx_backend_guard` 表在 DNAT 前阻断非 loopback、目的为本机的受保护 TCP 端口；覆盖 IPv4/IPv6 原生 INPUT 及常规 Docker 发布 DNAT/FORWARD 路径，不泛封路由转发同端口，不改其他表/全局 policy。
 - 保留本机 Nginx 的 `127.0.0.1` 连接，不改 CPA/sshd/Docker 绑定。**所有共享该端口的其他远端使用者也会被阻断**，不是按域名识别数据包。本机用户仍可直连，合法 Host/SNI 可伪造，应用鉴权不可移除。
@@ -261,6 +263,8 @@ shellcheck -x -S style nx.sh install.sh lib/*.sh tools/*.sh tests/*.sh
 for f in tests/*.sh; do bash "$f"; done
 bash tools/build-bundle.sh /tmp/nx-bundle
 ```
+
+自动工具安装真实包验证以 Ubuntu 22.04/24.04、Debian 12 和 Alpine 3.22 disposable 环境为边界；dnf/yum 包映射及安全拒绝有回归，完整 RPM 生命周期尚不在本轮实证范围。
 
 真实请求测试需要 `nginx`、Python 3、OpenSSL 和 curl；可通过 `NGINX_BIN` 指定隔离二进制。非特权测试在 source 前统一设置独占临时配置、证书、状态及主配置路径；真实请求测试使用临时 PID、日志和高位端口，不操作系统 Nginx 服务。CI 在 Ubuntu 22.04、Ubuntu 24.04 和 Alpine 3.22 中安装依赖并运行回归，覆盖 mock 回滚、真实 HTTP/TLS 请求、IPv6、ACME、默认站点和 HTTPS 保留。Ubuntu 任务还检查全部源码及生成 bundle 的 ShellCheck。OpenWrt/CentOS 的完整实机生命周期不在当前 CI 覆盖范围内。
 

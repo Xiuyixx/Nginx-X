@@ -76,10 +76,14 @@ case "$*" in *remote*) echo https://github.com/Xiuyixx/Nginx-X.git;; *pull*) exi
 MOCKGIT
 cat > "$root/mock/sudo" <<'MOCKSUDO'
 #!/bin/sh
-PATH="$(dirname "$0"):/usr/bin:/bin"
+PATH="$(dirname "$0"):/usr/sbin:/usr/bin:/sbin:/bin"
 export PATH
 exec "$@"
 MOCKSUDO
+for tool in nft ss; do
+ printf '#!/bin/sh\nexit 0\n' > "$root/mock/$tool"
+ chmod +x "$root/mock/$tool"
+done
 chmod +x "$root/mock/git" "$root/mock/sudo"
 # git is intercepted by an explicit function because secure PATH excludes fixture bin.
 PATH="$root/mock:$root/other:$PATH" bash -c 'source "$1"; SUDO=sudo; mock_git="$2"; sudo(){ if [[ "$1" == git ]]; then shift; "$mock_git" "$@"; else command sudo "$@"; fi; }; update_script' _ "$root/bin/nx" "$root/mock/git"

@@ -19,7 +19,7 @@ jobs:
         uses: actions/checkout@v5
 
       - name: Install test dependencies
-        run: sudo apt-get update && sudo apt-get install -y nginx shellcheck python3 openssl curl
+        run: sudo apt-get update && sudo apt-get install -y nginx shellcheck python3 openssl curl nftables iproute2
 
       - name: Bash syntax check
         run: |
@@ -50,7 +50,7 @@ jobs:
       - name: Test Alpine with its packaged Nginx
         run: |
           docker run --rm -v "$PWD:/project" -w /project alpine:3.22 sh -ec '
-            apk add --no-cache bash nginx python3 openssl curl git sudo coreutils findutils procps util-linux
+            apk add --no-cache bash nginx python3 openssl curl git sudo coreutils findutils procps util-linux nftables iproute2
             bash -ec '\''
               for test_file in tests/*.sh; do
                 echo "Running ${test_file}"
