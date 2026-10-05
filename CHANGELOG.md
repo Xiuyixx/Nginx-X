@@ -1,3 +1,10 @@
+## 2026-10-05 — 显式可选后端直连保护
+
+- 仅域名访问菜单新增独立后端保护启用/关闭与状态；不会因更新、诊断或 strict 开关静默写防火墙。
+- nftables 专有 inet pre-DNAT 规则保护已核验本机 TCP 后端，保留回环，支持双栈；共享端口引用计数。
+- root-owned 独立启动回放与失败恢复；受保护站点修改/停用/删除及卸载先明确拒绝，避免半成功和误解封。
+- 新增一次性 namespace/rootfs 真实网络 CI；覆盖原生 INPUT、模拟 Docker DNAT、共享端口、失败回滚与启动规则回放。实际 Docker daemon/systemd reboot 尚未实测；不支持的平台明确拒绝。
+
 # Changelog
 
 ---

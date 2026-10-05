@@ -353,6 +353,9 @@ nx_site_access_menu() {
   echo '1) 开启仅域名访问'
   echo '2) 关闭仅域名访问'
   echo '3) 管理本站默认访问入口'
+  echo "后端直连保护：$(nx_backend_status "$file")"
+  echo '4) 显式启用后端直连保护'
+  echo '5) 显式关闭本站后端保护引用'
   echo '0) 返回'
   echo '开启后 Nginx 入口只接受本站域名；关闭不会自动将 IP 请求分配给本站。'
   nx_access_scope_notice
@@ -363,6 +366,8 @@ nx_site_access_menu() {
        nx_access_scope_notice ;;
     2) nx_access_set_policy "$file" open ;;
     3) nx_default_site_menu "$file" ;;
+    4) nx_backend_enable "$file" ;;
+    5) nx_backend_disable "$file" ;;
     0) return 0 ;;
     *) warn '无效输入。'; return 1 ;;
   esac

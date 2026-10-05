@@ -2503,6 +2503,7 @@ realtime_info_menu() {
 
 # ---------- 功能7：卸载 ----------
 uninstall_script_only() {
+  nx_backend_uninstall_guard || return 1
   note "将执行：卸载当前已登记的 nx 安装入口。"
   if ! confirm "确认继续卸载本脚本？"; then
     info "已取消。"
@@ -2533,6 +2534,7 @@ uninstall_script_only() {
 }
 
 uninstall_nginx_only() {
+  nx_backend_uninstall_guard || return 1
   local pkg
   pkg="$(detect_pkg_mgr)"
   warn "将卸载 Nginx 软件包；保留配置、证书和日志供恢复。"
@@ -2789,7 +2791,7 @@ if [[ ! -r "${NX_LIB_DIR:-${SCRIPT_DIR}/lib}/transactions.sh" ]]; then
   fi
 fi
 NX_LIB_DIR="${NX_LIB_DIR:-${SCRIPT_DIR}/lib}"
-for nx_module in templates certificates transactions access https diagnostics; do
+for nx_module in templates certificates transactions access https diagnostics backend; do
   if [[ ! -r "${NX_LIB_DIR}/${nx_module}.sh" ]]; then
     error "缺少模块：${NX_LIB_DIR}/${nx_module}.sh，请重新运行 install.sh。"
     if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then exit 1; else return 1; fi

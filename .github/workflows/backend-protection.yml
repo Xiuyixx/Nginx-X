@@ -1,0 +1,28 @@
+name: backend-protection-isolated
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  real-network-proof:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v5
+      - name: Real nftables IPv4 IPv6 and pre-DNAT proof in disposable container
+        run: |
+          docker run --rm --privileged -v "$PWD:/project:ro" -w /project ubuntu:24.04 bash -ec '
+            export DEBIAN_FRONTEND=noninteractive
+            apt-get update
+            apt-get install -y bash nginx nftables iproute2 util-linux python3 curl procps coreutils findutils
+            mkdir -p /etc/nginx /etc/systemd/system /usr/local /var/lib /var/log
+            NX_BACKEND_ISOLATED=1 NGINX_BIN=/usr/sbin/nginx bash tests/backend_protection_isolated.sh
+          '
+      - name: Scope of boot proof
+        if: always()
+        run: echo 'Service-manager operations are recorded in the isolated rootfs; installed ExecStart executes real nft boot replay. Actual systemd reboot is not tested.'

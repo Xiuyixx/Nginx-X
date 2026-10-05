@@ -90,6 +90,7 @@ nx_transaction() (
     return 1
   }
   if nx_access_migrate_state && "$@" && nx_transaction_paths_safe && nx_acme_sync_routes && ensure_websocket_map && nx_access_sync_files &&
+     nx_backend_guard_snapshot "$snapshot/conf" &&
      { ! nx_transaction_changed || nx_transaction_reload; }; then
     trap - HUP INT TERM
     ${SUDO} rm -rf "$snapshot"
