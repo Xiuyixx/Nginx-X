@@ -4,6 +4,10 @@
 
 ## Unreleased
 
+### Added
+- 内部/外部反代沿原模式选择增加 6) 流式反代，面向 CPA / CLIProxyAPI / AI API / SSE；业务 location 仅增加 `proxy_buffering off` 与 `proxy_cache off`，不影响 ACME 或既有媒体模式。
+- 内部 `proxy_mode` 与外部原 `external_mode` 元数据支持模式往返、后端/端口修改与 HTTPS 保留；无字段的旧内部站点默认标准模式。更新脚本不会自动迁移已建站点，需通过原配置修改入口切换。
+
 ### Fixed
 - 合法 acme-challenge 前缀业务站点正常纳管和 strict 同步，真正 HTTP-01 helper 以完整受管内容识别，setter 拒绝未纳入同步的目标。
 - 证书交互部署在同锁内提交 stage、manifest 与发布，首次/已有域名失败恢复原归属和材料，失败域名不再阻断健康域名更新。

@@ -5,6 +5,12 @@ build_proxy_conf() {
   local listen_port="$2"
   local backend_port="$3"
   local out="$4"
+  local proxy_mode="${5:-normal}" stream_block=""
+  case "$proxy_mode" in
+    normal) ;;
+    streaming) stream_block=$'        proxy_buffering off;\n        proxy_cache off;' ;;
+    *) error "未知内部反代模式：$proxy_mode"; return 1 ;;
+  esac
 
 
   local ipv6_listen
@@ -15,6 +21,7 @@ build_proxy_conf() {
 # domain=${domain}
 # listen_port=${listen_port}
 # backend_port=${backend_port}
+# proxy_mode=${proxy_mode}
 
 server {
     listen ${listen_port};
@@ -29,6 +36,7 @@ ${ipv6_listen}
     }
 
     location / {
+${stream_block}
         proxy_pass http://127.0.0.1:${backend_port};
         proxy_http_version 1.1;
 
@@ -120,6 +128,9 @@ EOF
   fi
 
   case "$external_mode" in
+    streaming)
+      main_stream_block=$'        proxy_buffering off;\n        proxy_cache off;'
+      ;;
     media)
       main_stream_block=$(cat <<'BLOCK'
         # Stream 转发优化（Emby/Jellyfin 等）

@@ -1125,6 +1125,7 @@ stream_urls_to_array() {
 external_mode_name() {
   case "$1" in
     normal) echo "标准模式" ;;
+    streaming) echo "流式反代" ;;
     media) echo "Stream 模式" ;;
     emby_http) echo "Emby 分离 HTTP 推流" ;;
     emby_https) echo "Emby 分离 HTTPS 推流" ;;
@@ -1135,17 +1136,22 @@ external_mode_name() {
 
 select_external_mode() {
   local current="${1:-normal}"
-  local choice=""
+  local scope="${2:-external}"
+  local choice="" input_mode=""
 
-  echo "请选择外部反代模式：" >&2
+  echo "请选择反代模式：" >&2
   echo "1) 标准模式" >&2
-  echo "2) Stream 模式" >&2
-  echo "3) Emby 分离 HTTP 推流" >&2
-  echo "4) Emby 分离 HTTPS 推流" >&2
-  echo "5) LilyEmby 方案（访问/推流分离）" >&2
+  if [[ "$scope" == "external" ]]; then
+    echo "2) Stream 模式（Emby/Jellyfin）" >&2
+    echo "3) Emby 分离 HTTP 推流" >&2
+    echo "4) Emby 分离 HTTPS 推流" >&2
+    echo "5) LilyEmby 方案（访问/推流分离）" >&2
+  fi
+  echo "6) 流式反代（AI API / SSE）" >&2
 
   case "$current" in
     normal) choice="1" ;;
+    streaming) choice="6" ;;
     media) choice="2" ;;
     emby_http) choice="3" ;;
     emby_https) choice="4" ;;
@@ -1153,10 +1159,15 @@ select_external_mode() {
     *) choice="1" ;;
   esac
 
-  read -rp "选择模式 [1-5] (默认 ${choice}): " input_mode
+  read -rp "选择模式（内部 1/6，外部 1-6） (默认 ${choice}): " input_mode
   [[ -n "$input_mode" ]] && choice="$input_mode"
 
+  if [[ "$scope" == "internal" && "$choice" != "6" ]]; then
+    choice="1"
+  fi
+
   case "$choice" in
+    6) echo "streaming" ;;
     2) echo "media" ;;
     3) echo "emby_http" ;;
     4) echo "emby_https" ;;
@@ -1204,7 +1215,7 @@ ensure_ssl_directives_present() {
 }
 
 add_reverse_proxy() {
-  local domain listen_port backend_port target tmp
+  local domain listen_port backend_port target tmp proxy_mode
   local desired_port create_port force_enable_https="0"
 
   require_nginx_installed || return 1
@@ -1226,6 +1237,8 @@ add_reverse_proxy() {
     error "后端端口不合法。请输入 1-65535 之间的数字。"
     return 1
   fi
+
+  proxy_mode="$(select_external_mode normal internal)"
 
   nx_assert_new_target "$(conf_target_path "$domain" "$listen_port")" || return 1
 
@@ -1266,7 +1279,7 @@ add_reverse_proxy() {
   tmp="$(mktemp /tmp/nginxx-"${domain}"-XXXXXX)" || return 1
   trap 'rm -f "${tmp:-}"' RETURN
 
-  build_proxy_conf "$domain" "$create_port" "$backend_port" "$tmp" || { rm -f "$tmp"; return 1; }
+  build_proxy_conf "$domain" "$create_port" "$backend_port" "$tmp" "$proxy_mode" || { rm -f "$tmp"; return 1; }
   if [[ "$force_enable_https" == "1" ]]; then
     local tls_tmp
     tls_tmp="$(mktemp /tmp/nginxx-final-tls-XXXXXX)" || { rm -f "$tmp"; return 1; }
@@ -1567,7 +1580,7 @@ modify_conf() {
     return $?
   fi
 
-  local current_domain current_listen current_backend
+  local current_domain current_listen current_backend current_mode new_mode
   local new_domain new_listen new_backend tmp new_target
 
   current_domain="$(extract_domain_from_conf "$src")"
@@ -1604,6 +1617,11 @@ modify_conf() {
     return 1
   fi
 
+  current_mode="$(conf_meta_get "$src" proxy_mode)"
+  [[ -n "$current_mode" ]] || current_mode="normal"
+  note "当前方案：$(external_mode_name "$current_mode")"
+  new_mode="$(select_external_mode "$current_mode" internal)"
+
   # 监听端口占用检查（允许当前 nginx 使用旧配置的场景较复杂，这里采取严格策略）
   if is_port_used_os "$new_listen"; then
     warn "监听端口 ${new_listen} 当前被占用，可能导致冲突。"
@@ -1615,7 +1633,7 @@ modify_conf() {
 
   tmp="$(mktemp /tmp/nginxx-mod-"${new_domain}"-XXXXXX)"
   trap 'rm -f "${tmp:-}"' RETURN
-  build_proxy_conf "$new_domain" "$new_listen" "$new_backend" "$tmp" || return 1
+  build_proxy_conf "$new_domain" "$new_listen" "$new_backend" "$tmp" "$new_mode" || return 1
   nx_preserve_modify_tls "$src" "$tmp" "$new_domain" "$new_listen" || return 1
   new_target="$(conf_target_path "$new_domain" "$new_listen")"
   [[ "$src" == *.conf.bak ]] && new_target="${new_target}.bak"
