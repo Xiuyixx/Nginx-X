@@ -89,7 +89,7 @@ done
 # Exercise the exact proc fallback Python with in-memory proc fixtures (no
 # writable /proc or extra production override). Both address families required.
 python3 - "$PWD/lib/diagnostics.sh" <<'PYPROC'
-import contextlib, io, pathlib, sys, unittest.mock
+import contextlib, io, ipaddress, pathlib, sys, unittest.mock
 source = pathlib.Path(sys.argv[1]).read_text()
 code = source.split("<<'PYLISTEN'\n", 1)[1].split("\nPYLISTEN", 1)[0]
 def encoded(address):
@@ -112,9 +112,12 @@ def run(tcp, tcp6, fail=False):
         assert error.code == 1
         return None
     return out.getvalue().splitlines()
-assert run(table([('0.0.0.0','0A'),('127.0.0.1','0A'),('192.0.2.1','01')]),
-           table([('::','0A'),('::1','0A'),('::ffff:127.0.0.1','0A')])) == [
-    '0.0.0.0:8317','127.0.0.1:8317','[::]:8317','[::1]:8317','[::ffff:7f00:1]:8317']
+def normalize(endpoints):
+    return [(str(ipaddress.ip_address(host.strip('[]'))), int(port))
+            for host, port in (endpoint.rsplit(':', 1) for endpoint in endpoints)]
+assert normalize(run(table([('0.0.0.0','0A'),('127.0.0.1','0A'),('192.0.2.1','01')]),
+           table([('::','0A'),('::1','0A'),('::ffff:127.0.0.1','0A')]))) == normalize([
+    '0.0.0.0:8317','127.0.0.1:8317','[::]:8317','[::1]:8317','[::ffff:7f00:1]:8317'])
 assert run(table([('192.0.2.1','0A')]),table([('2001:db8::1','0A')])) == [
     '192.0.2.1:8317','[2001:db8::1]:8317']
 assert run('header\n', 'header\n', True) is None
