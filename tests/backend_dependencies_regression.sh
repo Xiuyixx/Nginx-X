@@ -13,10 +13,12 @@ for implementation in ./nx.sh "$root/bundle"; do
   # shellcheck disable=SC1090
   source "$implementation"
   uname() { echo Linux; }
+  # Mapping tests replace installation, so privilege validation is mocked too.
+  sudo() { [[ "$*" == -v ]]; }
   for manager in apt dnf yum apk; do
    for absent in nft ss both none; do
     nx_dependency_present() {
-     [[ -e "$root/ready" || "$absent" == none || ( "$absent" != both && "$1" != "$absent" ) ]]
+     [[ "$1" == sudo || -e "$root/ready" || "$absent" == none || ( "$absent" != both && "$1" != "$absent" ) ]]
     }
     nx_install_backend_packages() { printf '%s\n' "$*" > "$root/packages"; touch "$root/ready"; }
     rm -f "$root/ready" "$root/packages"
