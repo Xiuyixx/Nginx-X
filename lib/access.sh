@@ -344,30 +344,90 @@ nx_access_scope_notice() {
   echo '仅约束 Nginx 入口，不拦截后端服务的直连端口；不是鉴权，也不会隐藏公网 IP。'
 }
 
+# A single confirmation authorizes the two layers, inside one configuration lock.
+nx_domain_enable() (
+  # shellcheck disable=SC2034 # transaction reads dynamically scoped context
+  local NX_DOMAIN_ACTION=enable NX_DOMAIN_FILE="$1"
+  [[ $EUID == 0 ]] || { error '组合保护请使用 sudo 启动 Nginx-X（需要 root 私有快照与防火墙锁）。'; return 1; }
+  confirm '开启将同时限制 Nginx 域名入口并安装 nftables/systemd 本机后端保护；所有共享后端端口的远端访问都会被阻断，保留本机回环。确认开启？' || return 1
+  if ! nx_transaction nx_access_set_policy_files "$1" strict; then
+    error '开启未完成：需支持本机后端保护；外部/静态或不支持环境请在高级设置仅限制 Nginx。原设置已尝试恢复。'
+    return 1
+  fi
+  info '仅域名访问：完整开启（Nginx 入口 + 本机后端保护）。'
+)
+nx_domain_disable() (
+  # shellcheck disable=SC2034 # transaction reads dynamically scoped context
+  local NX_DOMAIN_ACTION=disable NX_DOMAIN_FILE="$1"
+  confirm '关闭会取消本站后端保护引用并解除 Nginx 域名限制；无其他共享引用时后端可能重新暴露公网。关闭不会自动设置 IP 默认入口。确认关闭？' || return 1
+  local backend
+  backend="$(nx_backend_status "$1")" || return 1
+  if [[ "$backend" != *'"sites": {'* || "$backend" == *'"sites": {}'* ]]; then
+    # shellcheck disable=SC2034
+    NX_DOMAIN_ACTION=""
+  else
+    [[ $EUID == 0 ]] || { error '组合关闭请使用 sudo 启动 Nginx-X。'; return 1; }
+  fi
+  nx_transaction nx_access_set_policy_files "$1" open || return 1
+  info '本站限制已关闭；其他站点共享后端保护仍保留。'
+)
+
+# Compare rendered bytes (not just metadata) and read actual live nft state.
+nx_domain_status() {
+  local file="$1" policy expected defaults backend
+  policy="$(nx_access_site_policy "$file")" || { echo 异常; return 1; }
+  defaults="$(conf_meta_get "$file" access_default)" || { echo 异常; return 1; }
+  expected="$(mktemp)" || return 1
+  if ! nx_access_parse "$file" transform "$([[ "$policy" == strict ]] && echo 1 || echo 0)" "$defaults" > "$expected" ||
+     ! cmp -s "$file" "$expected"; then
+    rm -f "$expected"; echo '异常（Nginx 规则与策略不一致）'; return 1
+  fi
+  rm -f "$expected"
+  if ! backend="$(nx_backend_status "$file" 2>/dev/null)"; then echo '异常（后端状态或实际规则漂移）'; return 1; fi
+  if [[ "$backend" == *'"sites": {'* && "$backend" != *'"sites": {}'* ]]; then
+    if [[ "$policy" == strict ]]; then echo '完整开启（入口 + 后端）'; else echo '异常（后端保护与入口策略不一致）'; return 1; fi
+  elif [[ "$policy" == strict ]]; then echo '仅 Nginx 入口（未保护后端直连）'
+  else echo 关闭; fi
+}
+
 nx_site_access_menu() {
-  local file="$1" c policy
+  local file="$1" c status
   [[ -f "$file" ]] || file="$CONF_DIR/$file"
-  policy="$(nx_access_site_policy "$file")" || return 1
+  nx_access_assert_managed_site "$file" || return 1
+  status="$(nx_domain_status "$file")" || :
   echo "站点: $(basename "$file")"
-  if [[ "$policy" == strict ]]; then echo '仅域名访问：已开启'; else echo '仅域名访问：已关闭'; fi
-  echo '1) 开启仅域名访问'
-  echo '2) 关闭仅域名访问'
-  echo '3) 管理本站默认访问入口'
-  echo "后端直连保护：$(nx_backend_status "$file")"
-  echo '4) 显式启用后端直连保护'
-  echo '5) 显式关闭本站后端保护引用'
+  echo "仅域名访问：${status}"
+  echo '1) 开启'
+  echo '2) 关闭'
+  echo '3) 高级设置'
   echo '0) 返回'
-  echo '开启后 Nginx 入口只接受本站域名；关闭不会自动将 IP 请求分配给本站。'
-  nx_access_scope_notice
+  echo '阻止 IP 访问不等于隐藏真实 IP；合法 Host/SNI 可伪造，应用鉴权必须保留。'
   read -rp '请选择: ' c || return 1
   case "$c" in
-    1) nx_access_set_policy "$file" strict || return 1
-       info '本站 Nginx 入口已开启严格域名校验。'
-       nx_access_scope_notice ;;
-    2) nx_access_set_policy "$file" open ;;
-    3) nx_default_site_menu "$file" ;;
-    4) nx_backend_enable "$file" ;;
-    5) nx_backend_disable "$file" ;;
+    1) nx_domain_enable "$file" ;;
+    2) nx_domain_disable "$file" ;;
+    3) nx_site_access_advanced_menu "$file" ;;
+    0) return 0 ;;
+    *) warn '无效输入。'; return 1 ;;
+  esac
+}
+
+nx_site_access_advanced_menu() {
+  local file="$1" c
+  echo '高级设置（仅 Nginx 入口不保护后端直连）'
+  echo '1) 仅开启 Nginx 域名限制'
+  echo '2) 修复/启用本机后端保护（需已有严格入口）'
+  echo '3) 解除本站后端保护引用（入口策略不变）'
+  echo '4) 管理本站默认访问入口'
+  echo '0) 返回'
+  read -rp '请选择: ' c || return 1
+  case "$c" in
+    1) confirm '仅限制 Nginx，不阻止后端 IP:端口 直连。确认？' || return 1
+       nx_access_set_policy "$file" strict || return 1
+       info '仅 Nginx 入口已开启；后端直连未保护。' ;;
+    2) nx_backend_enable "$file" ;;
+    3) nx_backend_disable "$file" ;;
+    4) nx_default_site_menu "$file" ;;
     0) return 0 ;;
     *) warn '无效输入。'; return 1 ;;
   esac

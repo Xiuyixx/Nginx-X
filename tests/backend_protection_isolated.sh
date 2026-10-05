@@ -71,8 +71,9 @@ cat > /tmp/shim/systemctl <<'SHIM'
 printf '%s\n' "$*" >> /tmp/systemctl.log
 case "$1" in
   is-active) echo inactive; exit 3 ;;
-  is-enabled) echo disabled; exit 1 ;;
-  enable) if [[ -e /tmp/fail-systemctl ]]; then rm -f /tmp/fail-systemctl; exit 1; fi ;;
+  is-enabled) if [[ -f /tmp/unit-enabled ]]; then echo enabled; else echo disabled; exit 1; fi ;;
+  enable) if [[ -e /tmp/fail-systemctl ]]; then rm -f /tmp/fail-systemctl; exit 1; fi; touch /tmp/unit-enabled ;;
+  disable) rm -f /tmp/unit-enabled ;;
   *) exit 0 ;;
 esac
 SHIM
@@ -146,7 +147,6 @@ reload_nginx_safe() {
   [[ ! -s /tmp/nginx.pid ]] || "$NGINX_BIN" -c "$NGINX_MAIN_CONF" -s reload
 }
 build_proxy_conf proof.example 18080 18317 "$NX_CONF_DIR/proof.conf"
-nx_access_set_policy "$NX_CONF_DIR/proof.conf" strict
 "$NGINX_BIN" -c "$NGINX_MAIN_CONF"
 site="$NX_CONF_DIR/proof.conf"
 external() { nsenter -t "$peer" -n curl --noproxy '*' -fsS --connect-timeout 1 --max-time 2 "$1"; }
@@ -180,8 +180,34 @@ nft -s list table inet proof_preserved > /tmp/preserved
 nft -s list table ip proof_docker > /tmp/docker.nft
 [[ "$(external http://192.0.2.1:18317)" == backend-proof ]]
 echo 'PASS: baseline IPv4/IPv6 INPUT and real veth/DNAT FORWARD backend reachable'
-nx_backend_enable "$site"
+cp "$site" /tmp/cancel-before
+confirm() { return 1; }
+refuse nx_site_access_menu "$site" <<< 1
+cmp "$site" /tmp/cancel-before
+refuse nx_site_access_menu "$site" <<< 2
+cmp "$site" /tmp/cancel-before
+confirm() { return 0; }
+nx_site_access_menu "$site" <<< 0
+nx_site_access_menu "$site" <<< $'3\n0'
+cmp "$site" /tmp/cancel-before
+# First-ever combination: backend succeeds, final reload fails; rollback must
+# remove all newly registered enable links and preserve failed-reload backup.
+cp "$site" /tmp/first-before
+old_reload="$(declare -f reload_nginx_safe)"
+reload_nginx_safe() { return 1; }
+refuse nx_site_access_menu "$site" <<< 1
+cmp "$site" /tmp/first-before
+[[ ! -e /tmp/unit-enabled && ! -e /etc/systemd/system/nginxx-backend-guard.service ]]
+[[ ! -e /var/lib/nginxx/backend-protection ]]
+find /tmp -maxdepth 1 -name 'nginxx-transaction-*' -type d | grep -q .
+eval "$old_reload"
+# Legacy strict-only users select 1 to add actual protection.
+nx_access_set_policy "$site" strict
+[[ "$(nx_domain_status "$site")" == '仅 Nginx 入口'* ]]
+
+nx_site_access_menu "$site" <<< 1
 nx_backend_status "$site"
+[[ "$(nx_domain_status "$site")" == 完整开启* ]]
 blocked http://192.0.2.1:18317
 blocked 'http://[2001:db8:1::1]:18317'
 # Also prove native IPv4 INPUT, independent of Docker's DNAT route.
@@ -194,7 +220,7 @@ curl --noproxy '*' -sS --max-time 2 http://127.0.0.1:18080 -H 'Host: wrong.examp
 [[ $rc == 52 && ! -s /tmp/wrong ]]
 echo 'PASS: native INPUT v4/v6 and pre-DNAT v4 blocked; local nginx exact Host works; wrong Host is real 444'
 nft -s list ruleset >/tmp/enabled.rules
-nx_backend_enable "$site"
+nx_site_access_menu "$site" <<< 1
 nft -s list ruleset >/tmp/repeated.rules
 cmp /tmp/enabled.rules /tmp/repeated.rules
 # Live drift must be visible and veto real configuration transactions; explicit enable repairs.
@@ -205,8 +231,9 @@ for drift in chain table; do
     nft delete table inet nginxx_backend_guard
   fi
   refuse nx_backend_status "$site"
+  [[ "$(nx_domain_status "$site" || true)" == 异常* ]]
   refuse nx_transaction true
-  nx_backend_enable "$site"
+  nx_site_access_menu "$site" <<< 1
   blocked http://192.0.2.1:18317
   blocked 'http://[2001:db8:1::1]:18317'
 done
@@ -216,22 +243,21 @@ change_protected() { sed -i 's/127.0.0.1:18317/127.0.0.1:18999/' "$site"; }
 refuse nx_transaction change_protected
 cmp "$site" /tmp/protected-original
 chmod 0666 "$site"
-refuse nx_backend_enable "$site"
+refuse nx_site_access_menu "$site" <<< 1
 chmod 0644 "$site"
 chown 65534 "$site"
-refuse nx_backend_enable "$site"
+refuse nx_site_access_menu "$site" <<< 1
 chown 0 "$site"
 echo 'PASS: live drift status/real transaction veto/repair, byte-exact rollback and unsafe site permissions'
 # A second site's reference keeps the same port protected.
 build_proxy_conf shared.example 18081 18317 "$NX_CONF_DIR/shared.conf"
-nx_access_set_policy "$NX_CONF_DIR/shared.conf" strict
-nx_backend_enable "$NX_CONF_DIR/shared.conf"
-nx_backend_disable "$site"
+nx_site_access_menu "$NX_CONF_DIR/shared.conf" <<< 1
+nx_site_access_menu "$site" <<< 2
 blocked http://192.0.2.1:18317
-nx_backend_disable "$NX_CONF_DIR/shared.conf"
+nx_site_access_menu "$NX_CONF_DIR/shared.conf" <<< 2
 [[ "$(external http://192.0.2.1:18317)" == backend-proof ]]
 [[ "$(external 'http://[2001:db8:1::1]:18317')" == backend-proof ]]
-nx_backend_disable "$site"
+nx_site_access_menu "$site" <<< 2
 echo 'PASS: repeated enable/disable and shared-port reference; disable restores both families'
 # Unknown/no-listener and privileged SSH target must never be protected.
 build_proxy_conf unknown.example 18082 18999 "$NX_CONF_DIR/unknown.conf"
@@ -243,13 +269,48 @@ refuse nx_backend_enable "$NX_CONF_DIR/ssh.conf"
 # Service-registration fault must roll back actual nft rules and exposure.
 nft -s list ruleset >/tmp/before-failure
 : > /tmp/fail-systemctl
-refuse nx_backend_enable "$site"
+refuse nx_site_access_menu "$site" <<< 1
 rm -f /tmp/fail-systemctl
 nft -s list ruleset >/tmp/after-failure
 cmp /tmp/before-failure /tmp/after-failure
 [[ "$(external http://192.0.2.1:18317)" == backend-proof ]]
+# Failed combination restores original policy/default bytes and nft state.
+cp "$site" /tmp/combo-before
+nft -s list ruleset >/tmp/combo-rules
+: > /tmp/fail-systemctl
+refuse nx_site_access_menu "$site" <<< 1
+cmp "$site" /tmp/combo-before
+nft -s list ruleset >/tmp/combo-after
+cmp /tmp/combo-rules /tmp/combo-after
+# Reload failure after firewall success restores strict and references together.
+nx_site_access_menu "$site" <<< 1
+cp "$site" /tmp/combo-before
+cp /var/lib/nginxx/backend-protection/manifest.json /tmp/combo-manifest
+nft -s list ruleset >/tmp/combo-rules
+old_reload="$(declare -f reload_nginx_safe)"
+reload_nginx_safe() { return 1; }
+refuse nx_site_access_menu "$site" <<< 2
+cmp "$site" /tmp/combo-before
+cmp /var/lib/nginxx/backend-protection/manifest.json /tmp/combo-manifest
+nft -s list ruleset >/tmp/combo-after
+cmp /tmp/combo-rules /tmp/combo-after
+eval "$old_reload"
+nx_site_access_menu "$site" <<< 2
+# Unsupported static combination must roll back, but strict-only disable works
+# even when nft/systemd manager is unavailable.
+printf '# managed_by=Nginx-X\nserver { listen 18089; server_name static.example; return 200 "static"; }\n' > "$NX_CONF_DIR/static.conf"
+nx_access_set_policy "$NX_CONF_DIR/static.conf" strict
+cp "$NX_CONF_DIR/static.conf" /tmp/static-before
+refuse nx_site_access_menu "$NX_CONF_DIR/static.conf" <<< 1
+cmp "$NX_CONF_DIR/static.conf" /tmp/static-before
+mv /usr/local/bin/systemctl /usr/local/bin/systemctl.saved
+nx_site_access_menu "$NX_CONF_DIR/static.conf" <<< 2
+mv /usr/local/bin/systemctl.saved /usr/local/bin/systemctl
+[[ "$(nx_domain_status "$NX_CONF_DIR/static.conf")" == 关闭 ]]
+echo 'PASS: cancellation/advanced-return/strict-only upgrade/unsupported combination and independent disable'
+echo 'PASS: combination failure and disable reload failure restore exact site/reference/nft state'
 echo 'PASS: SSH/unknown refusal and actual-rule rollback after service failure'
-nx_backend_enable "$site"
+nx_site_access_menu "$site" <<< 1
 # Reject a staged edit of the protected site; unchanged snapshot is accepted.
 mkdir -p /tmp/snapshot
 cp "$NX_CONF_DIR"/*.conf /tmp/snapshot/
@@ -274,7 +335,7 @@ blocked http://192.0.2.1:18317
 blocked 'http://[2001:db8:1::1]:18317'
 local_ok
 echo 'PASS: installed boot ExecStart actually replays nft protection after table loss (systemd reboot NOT tested)'
-nx_backend_disable "$site"
+nx_site_access_menu "$site" <<< 2
 nx_backend_uninstall_guard
 nft -s list table inet proof_preserved >/tmp/preserved-after
 cmp /tmp/preserved /tmp/preserved-after

@@ -39,6 +39,17 @@ nx_backend_uninstall_guard() {
 _nx_backend_engine() {
   # Paths are passed as data, never evaluated. Overrides are restricted inside
   # Python to a distinct network namespace (including read-only test fixtures).
+  local held=0
+  if [[ ${NX_IN_TRANSACTION:-0} == 1 && $EUID == 0 ]]; then held=1; fi
+  if (( held )); then
+    # shellcheck disable=SC2154 # descriptor dynamically scoped by nx_transaction
+    _nx_backend_python "$@" --held "$held" 9<&"$lock_fd"
+  else
+    _nx_backend_python "$@" --held "$held"
+  fi
+}
+
+_nx_backend_python() {
   ${SUDO:-} /usr/bin/python3 - "$@" --context \
     "${CONF_DIR:?}" "${NGINX_MAIN_CONF:-/etc/nginx/nginx.conf}" \
     "${NX_BACKEND_STATE_DIR:-/var/lib/nginxx/backend-protection}" \
@@ -343,17 +354,18 @@ def manager_check(systemctl):
             need(priority > -110 or c.get('type')=='filter' and priority == -300,
                  'foreign prerouting hook at/before protection priority')
 
-args=sys.argv[1:]; split=args.index('--context'); action=args[0]; operands=args[1:split]
+args=sys.argv[1:]; split=args.index('--context'); action=args[0]
+heldpos=args.index('--held'); held=args[heldpos+1]=='1'; operands=args[1:heldpos]
 conf,main,statepath,unitdir,test=args[split+1:]
 conf=pathlib.Path(conf); main=pathlib.Path(main); base=pathlib.Path(statepath); units=pathlib.Path(unitdir)
 try:
     need(os.geteuid()==0,'root privileges required')
-    need(action in ('enable','disable','status','guard','uninstall'),'unknown backend action')
+    need(action in ('enable','disable','status','guard','uninstall','checkpoint','restore'),'unknown backend action')
     overridden=(str(base)!='/var/lib/nginxx/backend-protection' or str(units)!='/etc/systemd/system')
     if overridden:
         need(test=='1' and os.stat('/proc/self/ns/net').st_ino != os.stat('/proc/1/ns/net').st_ino,
              'backend path overrides require an explicitly isolated network namespace')
-        if action in ('enable','disable'):
+        if action in ('enable','disable','restore'):
             need(os.stat('/proc/self/ns/mnt').st_ino != os.stat('/proc/1/ns/mnt').st_ino,
                  'mutating override tests also require an isolated mount namespace')
             for transport in ('/run/systemd/private','/run/dbus/system_bus_socket'):
@@ -369,7 +381,11 @@ try:
         cfd=os.open(str(conf),os.O_RDONLY|os.O_DIRECTORY); stack.callback(os.close,cfd)
         # A transaction already owns this directory flock; taking it again in a
         # separate Python process would deadlock. Guard is called under that lock.
-        if action != 'guard': fcntl.flock(cfd,fcntl.LOCK_EX)
+        if held:
+            need(os.fstat(9).st_ino == os.fstat(cfd).st_ino and os.fstat(9).st_dev == os.fstat(cfd).st_dev, 'invalid inherited configuration lock')
+            fcntl.flock(9,fcntl.LOCK_EX|fcntl.LOCK_NB)
+        elif action != 'guard': fcntl.flock(cfd,fcntl.LOCK_EX)
+        base_was_missing=not base.exists()
         if not base.exists():
             if action in ('status','guard','uninstall','disable'):
                 print('backend protection: disabled'); sys.exit(0)
@@ -379,7 +395,7 @@ try:
         if lock.is_symlink(): raise Refused('symlink firewall lock')
         if lock.exists(): trusted(lock)
         else:
-            need(action=='enable', 'missing state lock; recover manually')
+            need(action in ('enable','checkpoint'), 'missing state lock; recover manually')
             fd=os.open(str(lock),os.O_WRONLY|os.O_CREAT|os.O_EXCL,0o600); os.close(fd)
         lfd=os.open(str(lock),os.O_RDONLY|os.O_NOFOLLOW); stack.callback(os.close,lfd); fcntl.flock(lfd,fcntl.LOCK_EX)
         ownerpath=base/'owner'; manifestpath=base/'manifest.json'; replay=base/'replay.py'; unit=units/UNIT
@@ -408,11 +424,58 @@ try:
         if replay.is_symlink(): raise Refused('symlink replay script')
         if replay.exists(): trusted(replay); need(replay.read_text()==REPLAY,'replay script ownership/content mismatch')
 
+        if action in ('checkpoint','restore'):
+            need(held, 'combined recovery requires configuration transaction lock')
+            backup=pathlib.Path(operands[0])
+            # mktemp transaction backups intentionally live under sticky /tmp.
+            # Validate the private leaf and its private transaction parent.
+            for p in (backup,backup.parent):
+                st=p.lstat(); need(stat.S_ISDIR(st.st_mode) and st.st_uid==0 and not st.st_mode & 0o077, 'unsafe combination backup')
+            need(backup.parent.parent==pathlib.Path('/tmp') and backup.parent.name.startswith('nginxx-transaction-'), 'unexpected combination backup location')
+            nft=binary('nft')
+            if action=='checkpoint':
+                own=(base/'owner').read_text().strip() if (base/'owner').exists() else None
+                table=existing_table(nft,own)
+                atomic(backup/'prior-table',(table or '').encode())
+                atomic(backup/'absent',b'1' if base_was_missing else b'0')
+                shutil.copytree(base,backup/'state',symlinks=False)
+                if (units/UNIT).exists(): shutil.copy2(units/UNIT,backup/'unit')
+                systemctl=binary('systemctl'); manager_check(systemctl)
+                enabled=run([systemctl,'is-enabled',UNIT],check=False).stdout.strip()
+                need(enabled in ('enabled','disabled','static','not-found',''), 'unknown unit enable state')
+                atomic(backup/'enabled',enabled.encode())
+            else:
+                own=(base/'owner').read_text().strip() if (base/'owner').exists() else None
+                table=existing_table(nft,own)
+                batch=('delete table inet '+TABLE+'\n' if table else '')+(backup/'prior-table').read_text()
+                if batch: run([nft,'-f','-'],batch)
+                systemctl=binary('systemctl')
+                for p in base.iterdir():
+                    if p.name!='lock': p.unlink()
+                for p in (backup/'state').iterdir():
+                    st=p.lstat(); need(stat.S_ISREG(st.st_mode) and st.st_uid==0 and st.st_nlink==1 and not st.st_mode & 0o022, 'unsafe recovery file')
+                    if p.name!='lock': atomic(base/p.name,p.read_bytes(),stat.S_IMODE(p.stat().st_mode))
+                unit=units/UNIT
+                # Undo newly added enable links while the owned unit still exists.
+                if (backup/'enabled').read_text()!='enabled' and unit.exists():
+                    run([systemctl,'disable',UNIT])
+                if (backup/'unit').exists(): atomic(unit,(backup/'unit').read_bytes(),0o644)
+                elif unit.exists(): unit.unlink()
+                run([systemctl,'daemon-reload'])
+                if (backup/'enabled').read_text()=='enabled': run([systemctl,'enable',UNIT])
+                elif unit.exists() and (backup/'enabled').read_text()=='disabled': run([systemctl,'disable',UNIT])
+                if (backup/'absent').read_bytes()==b'1':
+                    lock.unlink(); base.rmdir()
+            sys.exit(0)
+
         sites=manifest['sites'] if manifest else {}
         if action=='status':
             file=operands[0] if operands else ''
             if file and not file.startswith('/'): file=str(conf/file)
             selected={k:v for k,v in sites.items() if not file or k==file}
+            for path,record in selected.items():
+                need(digest(read_site(pathlib.Path(path)))==record['sha256'],'protected site bytes drifted')
+                targets(read_site(pathlib.Path(path)).decode())
             print(json.dumps({'sites':selected,'persistence_installed':bool(owner)},sort_keys=True))
             if sites:
                 nft=binary('nft'); need(existing_table(nft,owner) is not None and live_matches(nft,manifest),'protection state exists but live nft rules are absent/drifted')
@@ -425,7 +488,7 @@ try:
             snap=pathlib.Path(operands[0]); need(snap.is_dir() and not snap.is_symlink(),'invalid snapshot directory')
             for path,s in sites.items():
                 p=pathlib.Path(path); before=read_site(snap/p.name, snapshot=True); after=read_site(p)
-                need(before==after and digest(after)==s['sha256'], 'protected site changed/deleted/renamed/disabled: '+path)
+                need((before==after or (held and len(operands)>1 and operands[1]==path)) and digest(after)==s['sha256'], 'protected site changed/deleted/renamed/disabled: '+path)
             protected={p for s in sites.values() for p in s['ports']}
             if protected:
                 nft=binary('nft')

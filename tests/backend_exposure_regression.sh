@@ -74,16 +74,18 @@ LISTEN 0 128 $endpoint 0.0.0.0:*"
   health_check_conf_file "$T/internal.conf" > "$T/out"
   grep -q '后端监听风险 8317' "$T/out"
   if grep -q 'privatepassword\|privatetoken' "$T/out"; then exit 1; fi
+  CONF_DIR="$T"
   nx_site_access_menu "$T/internal.conf" <<< 0 > "$T/out"
-  grep -q '仅约束 Nginx 入口' "$T/out"
-  grep -q '不是鉴权' "$T/out"
+  grep -q '阻止 IP 访问不等于隐藏真实 IP' "$T/out"
+  grep -q '应用鉴权必须保留' "$T/out"
   nx_access_set_policy() { [[ "$2" == strict ]]; }
-  nx_site_access_menu "$T/internal.conf" <<< 1 > "$T/out"
-  grep -q '本站 Nginx 入口已开启' "$T/out"
-  grep -q '不拦截后端服务的直连端口' "$T/out"
+  confirm() { return 0; }
+  nx_site_access_advanced_menu "$T/internal.conf" <<< 1 > "$T/out"
+  grep -q '仅 Nginx 入口已开启' "$T/out"
+  grep -q '后端直连未保护' "$T/out"
   nx_access_set_policy() { return 1; }
-  if nx_site_access_menu "$T/internal.conf" <<< 1 > "$T/out"; then exit 1; fi
-  if grep -q '本站 Nginx 入口已开启' "$T/out"; then exit 1; fi
+  if nx_site_access_advanced_menu "$T/internal.conf" <<< 1 > "$T/out"; then exit 1; fi
+  if grep -q '仅 Nginx 入口已开启' "$T/out"; then exit 1; fi
  )
 done
 # Exercise the exact proc fallback Python with in-memory proc fixtures (no

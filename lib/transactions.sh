@@ -41,6 +41,16 @@ nx_transaction() (
       return 1
     fi
   fi
+  local backend_checkpoint=0
+  if [[ -n ${NX_DOMAIN_ACTION:-} ]]; then
+    mkdir -m 700 "$snapshot/backend" || { ${SUDO} rm -rf "$snapshot"; return 1; }
+    if ! _nx_backend_engine checkpoint "$snapshot/backend"; then
+      error '无法备份后端保护；未执行组合操作。'
+      ${SUDO} rm -rf "$snapshot"
+      return 1
+    fi
+    backend_checkpoint=1
+  fi
   # Service managers and daemonized nginx must not retain our flock. The
   # transaction parent keeps its descriptor until commit/rollback completes.
   nx_transaction_reload() (
@@ -68,14 +78,18 @@ nx_transaction() (
     else
       ${SUDO} rm -f "$DOMAIN_ONLY_STATE" || rc=1
     fi
+    if (( backend_checkpoint )); then
+      _nx_backend_engine restore "$snapshot/backend" || rc=1
+    fi
     if (( rc )); then
       error "恢复文件失败；备份保留在 ${snapshot}，请立即检查。"
       return 1
     fi
-    ${SUDO} rm -rf "$snapshot"
     if ! nx_transaction_reload; then
-      error "磁盘配置已恢复，但旧配置重载失败；请检查 Nginx 服务状态。"
+      error "磁盘配置已恢复，但旧配置重载失败；备份保留在 ${snapshot}，请检查 Nginx 服务状态。"
+      return 1
     fi
+    ${SUDO} rm -rf "$snapshot"
   }
   trap 'trap - HUP INT TERM; nx_transaction_restore; exit 1' HUP INT TERM
   nx_transaction_changed() {
@@ -89,8 +103,19 @@ nx_transaction() (
     elif [[ -e "$NGINX_MAIN_CONF" ]]; then return 0; fi
     return 1
   }
-  if nx_access_migrate_state && "$@" && nx_transaction_paths_safe && nx_acme_sync_routes && ensure_websocket_map && nx_access_sync_files &&
-     nx_backend_guard_snapshot "$snapshot/conf" &&
+  nx_transaction_domain_before() {
+    [[ ${NX_DOMAIN_ACTION:-} != disable ]] || _nx_backend_engine disable "$NX_DOMAIN_FILE"
+  }
+  nx_transaction_domain_after() {
+    [[ ${NX_DOMAIN_ACTION:-} != enable ]] || _nx_backend_engine enable "$NX_DOMAIN_FILE" strict
+  }
+  nx_transaction_domain_guard() {
+    if [[ ${NX_DOMAIN_ACTION:-} == enable ]]; then
+      _nx_backend_engine guard "$snapshot/conf" "$NX_DOMAIN_FILE"
+    else nx_backend_guard_snapshot "$snapshot/conf"; fi
+  }
+  if nx_access_migrate_state && nx_transaction_domain_before && "$@" && nx_transaction_paths_safe && nx_acme_sync_routes && ensure_websocket_map && nx_access_sync_files &&
+     nx_transaction_domain_after && nx_transaction_domain_guard &&
      { ! nx_transaction_changed || nx_transaction_reload; }; then
     trap - HUP INT TERM
     ${SUDO} rm -rf "$snapshot"

@@ -66,7 +66,7 @@ reload_nginx_safe() {
 printf 'server { listen 127.0.0.1:18880; server_name acme-challenge-user.example; return 200 "private-site"; }\n' > "$T/import"
 import_single_conf "$T/import"
 site="$CONF_DIR/acme-challenge-user.example-18880.conf"
-nx_site_access_menu "$site" <<< 1
+nx_site_access_advanced_menu "$site" <<< $'1\ny'
 list_managed_conf_files 0 | grep -Fx "$site"
 grep -q nx-access-begin "$site"
 # Creation uses the real template + real transaction, not imported metadata.

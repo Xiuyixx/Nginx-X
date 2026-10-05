@@ -68,12 +68,12 @@ all|quoted)
   import_single_conf "$T/import" >/dev/null
   site="$CONF_DIR/example.com-18080.conf"
   check_literal "$site"
-  nx_site_access_menu "$site" <<< 1 >/dev/null
+  nx_site_access_advanced_menu "$site" <<< $'1\ny' >/dev/null
   [[ "$(conf_meta_get "$site" access_policy)" == strict ]]
   check_literal "$site"
-  nx_site_access_menu "$site" <<< 2 >/dev/null
+  nx_access_set_policy "$site" open >/dev/null
   check_literal "$site"
-  nx_site_access_menu "$site" <<< 1 >/dev/null
+  nx_site_access_advanced_menu "$site" <<< $'1\ny' >/dev/null
   nx_default_site_menu "$site" <<< 1 >/dev/null
   [[ "$(conf_meta_get "$site" access_default)" == '[::1]:18080' ]]
   check_literal "$site"
@@ -128,7 +128,7 @@ all|names)
   rm -f "$CONF_DIR"/*.conf
   printf 'server { listen 18081; server_name "example.com"; return 200; }\n' > "$T/names"
   import_single_conf "$T/names" >/dev/null
-  nx_site_access_menu "$CONF_DIR/example.com-18081.conf" <<< 1 >/dev/null
+  nx_site_access_advanced_menu "$CONF_DIR/example.com-18081.conf" <<< $'1\ny' >/dev/null
   [[ "$(conf_meta_get "$CONF_DIR/example.com-18081.conf" access_policy)" == strict ]]
   echo 'PASS: quoted server_name import and strict menu compatibility'
   ;;

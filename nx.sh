@@ -1561,9 +1561,9 @@ print_conf_list() {
     f="${f##*/}"
     case "$policy" in
       ''|inherit)
-        policy="仅域名访问：${effective}（沿用原设置）" ;;
-      strict) policy="仅域名访问：开启" ;;
-      open) policy="仅域名访问：关闭" ;;
+        policy="Nginx 域名限制：${effective}（沿用原设置）" ;;
+      strict) policy="Nginx 域名限制：开启" ;;
+      open) policy="Nginx 域名限制：关闭" ;;
       *) policy="无效策略" ;;
     esac
     status="已停用"; [[ "$f" == *.conf ]] && status="已启用"

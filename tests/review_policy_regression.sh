@@ -52,7 +52,7 @@ cmp "$site" "$T/before"
 # run_menu_action intentionally consumes status; its warning is the observable
 # failure signal. Nested setters/parsers must still fail and preserve bytes.
 : > "$T/warnings"
-run_menu_action nx_site_access_menu "$site" <<< 2
+run_menu_action nx_access_set_policy "$site" open
 [[ -s "$T/warnings" ]]
 cmp "$site" "$T/before"
 : > "$T/warnings"
@@ -69,7 +69,7 @@ nx_access_set_policy "$site" strict
 cp -a "$site" "$T/before"
 fail_reload=1
 : > "$T/warnings"
-run_menu_action nx_site_access_menu "$site" <<< 2
+run_menu_action nx_access_set_policy "$site" open
 [[ -s "$T/warnings" ]]
 cmp "$site" "$T/before"
 [[ "$(stat -c '%a:%u:%g' "$site")" == "640:$owner" ]]
