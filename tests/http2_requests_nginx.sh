@@ -98,6 +98,13 @@ s=s[:i]+'\n http2 '+sys.argv[3]+';'+s[i:]
 open(sys.argv[2],'w').write(s)
 PYDOWN
     nx_https_transform enable "$root/plain" example.com "$SSL_DIR" "$port" "$root/modern-source" > "$root/site"
+    # Preservation includes the generated :80 redirect. Strip it for this
+    # unprivileged runtime fixture just as in the primary TLS proof above.
+    python3 - "$root/site" <<'PYSTRIP'
+import sys
+p=sys.argv[1];s=open(p).read();a=s.index('server {');b=s.index('server {',a+8)
+open(p,'w').write(s[:a]+s[b:])
+PYSTRIP
     write_main
     "$NGINX_BIN" -t -p "$root/" -c "$root/nginx.conf" > "$root/test.log" 2>&1 || { cat "$root/test.log"; exit 1; }
   done
