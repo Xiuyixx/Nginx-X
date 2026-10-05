@@ -2724,11 +2724,34 @@ update_script() {
 
   info "脚本已更新到最新版本（${target_bin}）。"
 
-  # 是否自动重启进入新版本（在交互式主菜单中才触发，直接 exec 替换当前进程）
-  if [[ "${NX_IN_MENU:-0}" == "1" ]]; then
+  # 交互式主菜单更新后，明确等待用户按回车再 exec 新版本。
+  # 非交互/source/bundle 入口保持原有返回语义，不能阻塞或自启动。
+  if [[ "${NX_IN_MENU:-0}" == "1" && -t 0 && -t 1 ]]; then
+    note "更新已完成。按回车重启并进入新版本；输入其他内容或发送 EOF 将返回菜单。"
+    local restart_input=""
+    if ! IFS= read -r -p "按回车重启，其他输入取消: " restart_input; then
+      note "已取消重启，返回菜单。"
+      return 0
+    fi
+    if [[ -n "$restart_input" ]]; then
+      note "已取消重启，返回菜单。"
+      return 0
+    fi
     note "正在重启 nx 并进入新版本..."
-    sleep 1
+    # Bash otherwise exits on a failed exec even inside a menu conditional.
+    local restore_execfail=0 restore_errexit=0
+    shopt -q execfail || restore_execfail=1
+    [[ "$-" == *e* ]] && restore_errexit=1
+    shopt -s execfail
+    # exec is a special builtin: its failure bypasses conditional errexit
+    # suppression, so disable errexit explicitly and restore it on failure.
+    set +e
+    # shellcheck disable=SC2093 # Only failed exec continues with execfail enabled.
     exec "$target_bin"
+    if [[ "$restore_execfail" == 1 ]]; then shopt -u execfail; fi
+    if [[ "$restore_errexit" == 1 ]]; then set -e; fi
+    error "重启新版本失败：$target_bin"
+    return 1
   fi
   note "重新启动 nx 后生效。"
 }
