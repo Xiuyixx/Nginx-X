@@ -78,6 +78,8 @@ cat > "$root/mock/sudo" <<'MOCKSUDO'
 #!/bin/sh
 PATH="$(dirname "$0"):/usr/sbin:/usr/bin:/sbin:/bin"
 export PATH
+[ "${1:-}" != -v ] || exit 0
+[ "${1:-}" != -n ] || shift
 exec "$@"
 MOCKSUDO
 for tool in nft ss; do
@@ -85,7 +87,7 @@ for tool in nft ss; do
  chmod +x "$root/mock/$tool"
 done
 chmod +x "$root/mock/git" "$root/mock/sudo"
-# git is intercepted by an explicit function because secure PATH excludes fixture bin.
+# Worker commands must be executable fixtures, not parent-only shell functions.
 PATH="$root/mock:$root/other:$PATH" bash -c 'source "$1"; SUDO=sudo; mock_git="$2"; sudo(){ if [[ "$1" == git ]]; then shift; "$mock_git" "$@"; else command sudo "$@"; fi; }; update_script' _ "$root/bin/nx" "$root/mock/git"
 [[ -f "$root/bin/nx" && "$(cat "$root/other/nx")" == unrelated ]] || fail 'secure PATH update identity'
 printf 'DOMAIN_ONLY=1\n' > "$root/shared-policy"

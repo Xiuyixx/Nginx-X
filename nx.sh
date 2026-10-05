@@ -25,6 +25,7 @@ fi
 CONF_DIR="${NX_CONF_DIR:-$CONF_DIR}"
 SSL_DIR="${SSL_DIR:-/etc/nginx/ssl}"
 NGINX_MAIN_CONF="${NGINX_MAIN_CONF:-/etc/nginx/nginx.conf}"
+NX_ORIGINAL_ARGS=("$@")
 NX_RUNNING_SOURCE="$(readlink -f "${BASH_SOURCE[0]}")"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 STATE_DIR="${STATE_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/nginxx}"
@@ -50,7 +51,7 @@ note() { echo -e "${BLUE}[信息]${NC} $*"; }
 
 pause() {
   echo
-  read -rp "按回车继续..." _
+  read -rp "按回车继续..." _ || return 0
 }
 
 cleanup_tmp_file() {
@@ -1784,7 +1785,7 @@ config_file_action_menu() {
     echo "8) 站点健康检查"
     echo "0) 返回上一级"
     echo "============================"
-    read -rp "请选择: " c
+    read -rp "请选择: " c || return 0
 
     case "$c" in
       1) run_menu_action enable_conf "$file"; pause; return 0 ;;
@@ -1817,7 +1818,7 @@ config_manage_menu() {
     echo
     echo "0) 返回上一级"
     echo "==============================="
-    read -rp "请选择配置序号: " c
+    read -rp "请选择配置序号: " c || return 0
 
     if [[ "$c" == "0" ]]; then
       return 0
@@ -2121,7 +2122,7 @@ dns_setup_menu() {
     echo "5) 自定义输入"
     echo "0) 返回上一级"
     echo "================================"
-    read -rp "请选择: " c
+    read -rp "请选择: " c || return 0
 
     local ns1="" ns2=""
 
@@ -2201,7 +2202,7 @@ config_entry_menu() {
     echo "5) 系统DNS设置"
     echo "0) 返回上一级"
     echo "=============================="
-    read -rp "请选择: " c
+    read -rp "请选择: " c || return 0
 
     case "$c" in
       1) run_menu_action add_reverse_proxy; pause ;;
@@ -2461,7 +2462,7 @@ cert_menu() {
     echo "6) 启用证书（HTTPS 强制跳转）"
     echo "0) 返回上一级"
     echo "========================================"
-    read -rp "请选择: " c
+    read -rp "请选择: " c || return 0
 
     case "$c" in
       1) run_menu_action set_acme_email; pause ;;
@@ -2491,7 +2492,7 @@ realtime_info_menu() {
     echo "3) 健康检查"
     echo "0) 返回上一级"
     echo "============================="
-    read -rp "请选择: " c
+    read -rp "请选择: " c || return 0
 
     case "$c" in
       1) show_nginx_realtime_status ;;
@@ -2639,7 +2640,7 @@ uninstall_menu() {
     echo "4) 卸载脚本 + Nginx + Acme（保留 Nginx 配置/日志）"
     echo "0) 返回上一级"
     echo "=========================="
-    read -rp "请选择: " c
+    read -rp "请选择: " c || return 0
 
     case "$c" in
       1) run_menu_action uninstall_script_only; pause ;;
@@ -2659,36 +2660,11 @@ banner() {
   echo "========================================"
 }
 
-update_script() {
-  # 优先使用当前脚本所在目录（如果它本身是个 git 仓库），
-  # 其次 fallback 到传统安装目录 REPO_INSTALL_DIR（/opt/Nginx-X）。
-  # 以适配安装到非标准路径 / 开发环境直接运行的场景。
-  local work_dir="" target_bin
-  target_bin="$(installed_script_target)" || return 1
-  local source_repo="${NX_INSTALLED_REPO:-$REPO_INSTALL_DIR}"
-  if ! check_cmd git; then
-    error "更新需要 git，请先安装 git。"
-    return 1
-  fi
-  if [[ -e "$source_repo/.git" ]]; then
-    work_dir="$source_repo"
-  fi
-
-  note "正在从 ${REPO_URL} (分支: ${REPO_BRANCH}) 更新脚本..."
-
+# The worker contains only update functions/values, never the menu or a live
+# source path (the repository may change while it runs).
+nx_update_publish() {
+  local work_dir="$1" target_bin="$2" source_repo="$3"
   if [[ -n "$work_dir" ]]; then
-    # 校对 remote，防止已仓库指向旧 fork
-    local cur_remote=""
-    cur_remote="$(${SUDO} git -C "$work_dir" remote get-url origin 2>/dev/null || echo '')"
-    if [[ -n "$cur_remote" && "$cur_remote" != "$REPO_URL" ]]; then
-      warn "当前仓库 remote 与内置 REPO_URL 不一致："
-      warn "  本地: $cur_remote"
-      warn "  预期: $REPO_URL"
-      if ! confirm "仍从本地 remote 拉取（保留现有配置）？"; then
-        info "已取消更新。"
-        return 0
-      fi
-    fi
     if ! ${SUDO} git -C "$work_dir" pull --ff-only origin "${REPO_BRANCH}"; then
       error "拉取最新代码失败，请检查网络或手动更新。"
       return 1
@@ -2719,39 +2695,131 @@ update_script() {
 
   if [[ -n "$bin_md5_before" && "$bin_md5_before" == "$bin_md5_after" ]]; then
     info "当前已是最新版本（${target_bin}）。"
-    return 0
+    return 10
   fi
 
-  info "脚本已更新到最新版本（${target_bin}）。"
+  return 0
+}
 
-  # 交互式主菜单更新后，明确等待用户按回车再 exec 新版本。
-  # 非交互/source/bundle 入口保持原有返回语义，不能阻塞或自启动。
-  if [[ "${NX_IN_MENU:-0}" == "1" && -t 0 && -t 1 ]]; then
-    note "更新已完成。按回车重启并进入新版本；输入其他内容或发送 EOF 将返回菜单。"
-    local restart_input=""
-    if ! IFS= read -r -p "按回车重启，其他输入取消: " restart_input; then
-      note "已取消重启，返回菜单。"
-      return 0
+update_script() {
+  local target_bin source_repo work_dir="" cur_remote job rc=0 hungup=0
+  target_bin="$(installed_script_target)" || return 1
+  source_repo="${NX_INSTALLED_REPO:-$REPO_INSTALL_DIR}"
+  local cmd
+  for cmd in git python3 flock; do
+    check_cmd "$cmd" || { error "更新需要 $cmd，请先安装。"; return 1; }
+  done
+  if [[ -e "$source_repo/.git" ]]; then
+    work_dir="$source_repo"
+    cur_remote="$(${SUDO} git -C "$work_dir" remote get-url origin 2>/dev/null || true)"
+    if [[ -n "$cur_remote" && "$cur_remote" != "$REPO_URL" ]]; then
+      warn "当前仓库 remote 与内置 REPO_URL 不一致：$cur_remote"
+      confirm "仍从本地 remote 拉取（保留现有配置）？" || return 0
     fi
-    if [[ -n "$restart_input" ]]; then
-      note "已取消重启，返回菜单。"
-      return 0
-    fi
-    note "正在重启 nx 并进入新版本..."
-    # Bash otherwise exits on a failed exec even inside a menu conditional.
+  fi
+  # Authorize elevation while the caller still owns the terminal. Workers use
+  # sudo -n only: a disconnected worker must never wait for a password.
+  if [[ -n "$SUDO" ]]; then ${SUDO} -v || return 1; fi
+  job="$(${SUDO} mktemp -d /tmp/nginxx-update-XXXXXXXX)" || return 1
+  ${SUDO} chmod 0700 "$job" || return 1
+  (
+    umask 077
+    printf '#!/usr/bin/env bash\nset -uo pipefail\ntrap "" INT HUP\n'
+    printf 'GREEN=%q\nYELLOW=%q\nRED=%q\nBLUE=%q\nNC=%q\n' "$GREEN" "$YELLOW" "$RED" "$BLUE" "$NC"
+    declare -f nx_update_publish check_cmd info warn error note
+    printf 'SUDO=%q\nREPO_URL=%q\nREPO_BRANCH=%q\n' "${SUDO:+sudo -n}" "$REPO_URL" "$REPO_BRANCH"
+    printf 'nx_update_publish %q %q %q\n' "$work_dir" "$target_bin" "$source_repo"
+  ) | ${SUDO} tee "$job/worker.sh" >/dev/null || return 1
+  ${SUDO} chmod 0600 "$job/worker.sh" || return 1
+  local saved_int saved_hup
+  saved_int="$(trap -p INT)"; saved_hup="$(trap -p HUP)"
+  trap ':' INT
+  trap 'hungup=1' HUP
+  note "后台更新交接已安排；日志/状态：$job（关键期 Ctrl+C 不取消更新）"
+  # Python is only a launcher/waiter; its child has a new session, no tty,
+  # private output and an inherited lock. It cannot start an interactive menu.
+  if (trap '' INT HUP; ${SUDO} python3 - "$job" "$target_bin" "$source_repo" <<'PYWORKER'
+import fcntl, os, signal, stat, subprocess, sys
+job, target, repo = sys.argv[1:]
+os.umask(0o077)
+signal.signal(signal.SIGINT, signal.SIG_IGN)
+signal.signal(signal.SIGHUP, signal.SIG_IGN)
+# Installation parent is trusted, but existing lock symlinks are not.
+try:
+    locks = []
+    for path in sorted(set([os.path.realpath(repo) + '.update.lock', target + '.update.lock'])):
+        fd = os.open(path, os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
+        st = os.fstat(fd)
+        if not stat.S_ISREG(st.st_mode) or st.st_uid != os.geteuid() or st.st_mode & 0o077:
+            raise RuntimeError('unsafe update lock')
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        locks.append(fd)
+except (OSError, RuntimeError) as e:
+    print('更新锁失败（可能已有更新）：' + str(e), file=sys.stderr)
+    sys.exit(1)
+# The detached monitor owns the lock through completion and records a final
+# state even when the original foreground waiter has been terminated.
+r, w = os.pipe()
+pid = os.fork()
+if pid == 0:
+    os.close(r)
+    os.setsid()
+    null = os.open(os.devnull, os.O_RDONLY)
+    os.dup2(null, 0); os.close(null)
+    def notify(message):
+        try: os.write(w, message)
+        except BrokenPipeError: pass
+    with open(job + '/log', 'ab', buffering=0) as log:
+        os.dup2(log.fileno(), 1); os.dup2(log.fileno(), 2)
+        try:
+            child = subprocess.Popen(['bash', job + '/worker.sh'], stdin=subprocess.DEVNULL)
+            notify(b'STARTED\n')
+            result = child.wait()
+        except Exception as e:
+            print(str(e), flush=True); result = 1
+        with open(job + '/status.tmp', 'w') as status:
+            status.write(str(result) + '\n')
+        os.replace(job + '/status.tmp', job + '/status')
+        for lock in locks: os.close(lock)
+        notify(('DONE:' + str(result) + '\n').encode())
+    os._exit(0)
+os.close(w)
+for fd in locks: os.close(fd)
+with os.fdopen(r) as stream:
+    started = stream.readline().strip()
+    if started != 'STARTED': sys.exit(1)
+    print('更新助手已启动（已脱离终端）', flush=True)
+    done = stream.readline().strip()
+os.waitpid(pid, 0)
+sys.exit(int(done[5:]) if done.startswith('DONE:') else 1)
+PYWORKER
+  ) then rc=0; else rc=$?; fi
+  ${SUDO} cat "$job/log" 2>/dev/null || true
+  trap - INT HUP
+  [[ -z "$saved_int" ]] || eval "$saved_int"
+  [[ -z "$saved_hup" ]] || eval "$saved_hup"
+  # HUP means the original tty/session must not be reused, even if isatty
+  # temporarily still reports true. No EOF menu spinning after disconnect.
+  if [[ "$hungup" == 1 ]]; then NX_UPDATE_HUP=1; return 129; fi
+  if [[ "$rc" == 10 ]]; then info "当前已是最新版本（${target_bin}）。"; return 0; fi
+  if [[ "$rc" != 0 ]]; then error "更新失败；旧入口保留。查看 ${SUDO:+sudo }cat $job/log 和 $job/status"; return "$rc"; fi
+  info "脚本已更新到最新版本（${target_bin}）。"
+  if [[ "${NX_IN_MENU:-0}" == 1 && -t 0 && -t 1 ]]; then
+    note "正在自动加载新版 nx..."
     local restore_execfail=0 restore_errexit=0
     shopt -q execfail || restore_execfail=1
     [[ "$-" == *e* ]] && restore_errexit=1
     shopt -s execfail
-    # exec is a special builtin: its failure bypasses conditional errexit
-    # suppression, so disable errexit explicitly and restore it on failure.
     set +e
-    # shellcheck disable=SC2093 # Only failed exec continues with execfail enabled.
-    exec "$target_bin"
-    if [[ "$restore_execfail" == 1 ]]; then shopt -u execfail; fi
-    if [[ "$restore_errexit" == 1 ]]; then set -e; fi
-    error "重启新版本失败：$target_bin"
-    return 1
+    # Same foreground process/session and tty: no shell competing for input.
+    # shellcheck disable=SC2093
+    exec "$target_bin" "${NX_ORIGINAL_ARGS[@]}"
+    rc=$?
+    [[ "$restore_execfail" == 0 ]] || shopt -u execfail
+    [[ "$restore_errexit" == 0 ]] || set -e
+    printf 'exec failed: %s (rc=%s)\n' "$target_bin" "$rc" | ${SUDO} tee -a "$job/log" >/dev/null || true
+    error "重启新版本失败：$target_bin；请手动运行该入口恢复，日志：$job/log"
+    return "$rc"
   fi
   note "重新启动 nx 后生效。"
 }
@@ -2776,14 +2844,14 @@ main() {
   while true; do
     banner
     main_menu
-    read -rp "请选择功能: " choice
+    read -rp "请选择功能: " choice || return 0
 
     case "$choice" in
       1) run_menu_action install_or_upgrade_nginx; pause ;;
       2) config_entry_menu ;;
       3) cert_menu ;;
       4) realtime_info_menu ;;
-      5) NX_IN_MENU=1 run_menu_action update_script; NX_IN_MENU=0; pause ;;
+      5) NX_IN_MENU=1 run_menu_action update_script; NX_IN_MENU=0; [[ "${NX_UPDATE_HUP:-0}" != 1 ]] || return 129; [[ -t 0 && -t 1 ]] || return 0; pause ;;
       6) uninstall_menu ;;
       0) info "已退出 ${APP_NAME}。"; exit 0 ;;
       *) warn "无效输入，请输入主菜单中的编号（0-6）。"; pause ;;

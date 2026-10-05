@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 # Deterministic PTY proof for the interactive updater.  The Python harness keeps
-# the updater blocked at its explicit read, then releases it with Enter.
+# publication blocked on a FIFO, then validates automatic foreground exec.
 # shellcheck source=tests/fixtures/test-environment.sh
 source "$(dirname "${BASH_SOURCE[0]}")/fixtures/test-environment.sh"
 cd "$(dirname "$0")/.."
@@ -49,11 +49,12 @@ DRIVER
 chmod +x "$root/driver.sh"
 
 ROOT="$root" python3 - <<'PY'
-import os, pty, select, subprocess, sys, time
+import os, pty, select, subprocess, sys, time, re, pathlib, fcntl, signal
 root = os.environ['ROOT']
 env = os.environ.copy()
 env.update(SOURCE=root + '/source', TARGET_BIN=root + '/bin/nx', MARKER=root + '/executed',
-          PATH=root + ':' + env['PATH'])
+          PATH=root + ':' + env['PATH'], GATE=root + '/gate')
+os.mkfifo(root + '/gate')
 def scenario(mode, entry=None):
     marker = root + '/executed'
     if os.path.exists(marker): os.unlink(marker)
@@ -66,8 +67,10 @@ def scenario(mode, entry=None):
         if mode == 'failure': f.write('exit 42\n')
         elif mode == 'unchanged': f.write('exit 0\n')
         else:
-            f.write("printf '#!/bin/bash\\nprintf EXECUTED > \"$MARKER\"\\nprintf EXECUTED\\n' > \"$TARGET_BIN\"\n")
-            f.write('chmod 0755 "$TARGET_BIN"\n')
+            # FIFO gate makes signal/close tests deterministic, no timing guess.
+            f.write('read -r _ < "$GATE"\n')
+            f.write("cat > \"$TARGET_BIN\" <<'NEW'\n#!/bin/bash\nprintf PUBLISHED > \"$MARKER\"\nprintf 'NEW_INPUT:\\n'\nread -r value || exit 0\nprintf 'INPUT:%s\\n' \"$value\"\nNEW\n")
+            f.write('chmod ' + ('0644' if mode == 'execfail' else '0755') + ' "$TARGET_BIN"\n')
     child_env = env.copy()
     if entry: child_env['ENTRY'] = entry
     pid, fd = pty.fork()
@@ -88,26 +91,45 @@ def scenario(mode, entry=None):
             raise SystemExit(mode + ': missing expected output: ' + repr(data[-800:]))
     if mode in ('failure', 'unchanged'):
         read_until(b'RETURNED:')
-        assert '按回车重启，其他输入取消:'.encode() not in data
     else:
-        read_until('按回车重启，其他输入取消:'.encode())
-        assert not os.path.exists(marker), 'exec occurred before input'
-        # Prompt is emitted immediately before the blocking read; the kernel
-        # PTY canonical input queue is empty. No sleep/timing guess is used.
-        if mode == 'cancel': os.write(fd, b'no\n')
-        elif mode == 'eof': os.write(fd, b'\x04')
-        elif mode == 'execfail':
-            os.chmod(target, 0o644)
-            os.write(fd, b'\n')
-        else: os.write(fd, b'\n')
-        read_until(b'EXECUTED' if mode == 'enter' else b'RETURNED:')
+        read_until('更新助手已启动'.encode())
+        if mode == 'interrupt': os.write(fd, b'\x03')
+        if mode == 'disconnect':
+            os.close(fd)
+        if mode == 'concurrent':
+            other = subprocess.run([root + '/driver.sh'], env=child_env, stdin=subprocess.DEVNULL, capture_output=True, timeout=10)
+            assert other.returncode != 0 and '更新锁失败'.encode() in other.stdout + other.stderr
+        gate = os.open(root + '/gate', os.O_WRONLY)
+        os.write(gate, b'go\n'); os.close(gate)
+        if mode == 'disconnect':
+            os.waitpid(pid, 0)
+            # Worker status and published marker are evidence after tty loss.
+            end = time.monotonic() + 10
+            while 'NEW_INPUT' not in open(target).read() and time.monotonic() < end:
+                time.sleep(.02)
+            assert 'NEW_INPUT' in open(target).read(), 'detached publication did not finish'
+            job = re.search(rb'/tmp/nginxx-update-[A-Za-z0-9]+', data).group().decode()
+            status_file = pathlib.Path(job) / 'status'
+            while not status_file.exists() and time.monotonic() < end: time.sleep(.02)
+            assert status_file.read_text().strip() == '0'
+            assert not os.path.exists(marker), 'offline menu executed'
+            lock = os.open(target + '.update.lock', os.O_RDWR)
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB); os.close(lock)
+            return
+        read_until(b'RETURNED:' if mode == 'execfail' else b'NEW_INPUT:')
+        if mode != 'execfail':
+            os.write(fd, b'hello\n')
+            read_until(b'INPUT:hello')
     _, status = os.waitpid(pid, 0)
     os.close(fd)
-    expected = 1 if mode in ('failure', 'execfail') else 0
+    expected = 126 if mode == 'execfail' else (1 if mode == 'failure' else 0)
     assert os.waitstatus_to_exitcode(status) == expected, (mode, status, data)
-    assert os.path.exists(marker) == (mode == 'enter'), (mode, data)
+    assert os.path.exists(marker) == (mode in ('enter', 'interrupt', 'concurrent')), (mode, data)
     if mode == 'execfail': assert '重启新版本失败'.encode() in data
-for mode in ('enter', 'cancel', 'eof', 'execfail', 'failure', 'unchanged'):
+# Main EOF must terminate even in a conditional (errexit suppressed).
+eof = subprocess.run(['bash', '-c', 'source "$SOURCE/nx.sh"; ensure_runtime_dependencies(){ :; }; ensure_dirs(){ :; }; ensure_websocket_map(){ :; }; nx_migrate_certificate_renewal(){ :; }; banner(){ :; }; if main; then :; fi'], env=env, stdin=subprocess.DEVNULL, capture_output=True, timeout=5)
+assert eof.returncode == 0 and eof.stdout.count(b'5)') == 1
+for mode in ('enter', 'interrupt', 'concurrent', 'disconnect', 'execfail', 'failure', 'unchanged'):
     scenario(mode)
 # Also exercise the production-generated standalone bundle helper on a PTY.
 subprocess.run(['bash', 'tools/build-bundle.sh', root + '/bundle'], check=True)
@@ -116,6 +138,11 @@ scenario('enter', root + '/bundle')
 PY
 
 # Non-interactive success must return without exec or blocking.
+cat > "$root/source/install.sh" <<'INSTALL'
+#!/bin/bash
+printf "#!/bin/bash\nexit 0\n" > "$TARGET_BIN"
+chmod +x "$TARGET_BIN"
+INSTALL
 rm -f "$root/executed"
 MARKER="$root/executed" SOURCE="$root/source" TARGET_BIN="$root/bin/nx" \
   PATH="$root:$PATH" bash "$root/driver.sh" </dev/null >/dev/null
@@ -133,4 +160,4 @@ if MARKER="$root/executed" SOURCE="$root/source" TARGET_BIN="$root/bin/nx" \
   exit 1
 fi
 [[ ! -e "$root/executed" ]] || { echo 'failed update execed replacement' >&2; exit 1; }
-echo 'ok: interactive update waits for Enter; non-interactive and failed updates do not exec'
+echo 'ok: interactive detached update automatically execs; non-interactive and failed updates do not exec'
