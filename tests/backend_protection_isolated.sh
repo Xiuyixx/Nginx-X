@@ -244,7 +244,7 @@ for implementation in /work/nx.sh /tmp/nx-bundle; do
   source "$implementation"
   eval "$isolated_reload"
   nft -s list ruleset >/tmp/tls-before.rules
-  # Menu 7 chooses the production toggle; explicit port for isolated requests.
+  # Menu 8 chooses the production toggle; explicit port for isolated requests.
   enable_https_for_conf_file proof.example "$site" 18443
   https_ok
   nx_backend_status "$site"
@@ -280,6 +280,41 @@ for implementation in /work/nx.sh /tmp/nx-bundle; do
   nx_backend_status "$site"
 done
 echo 'PASS: protected HTTPS source/bundle on/off, exact root rewrite, live dual-stack nft unchanged, reload rollback and unsafe mutation veto'
+# Remove only the exact hand-written fixture, then exercise the new mapping
+# through the real protected transaction. Firewall state must never change.
+sed '/location = \/ { rewrite \^ \/management.html last; }/d' "$site" >/tmp/home-clean
+apply_conf_preserved_with_rollback /tmp/home-clean "$site"
+for implementation in /work/nx.sh /tmp/nx-bundle; do
+  source "$implementation"
+  eval "$isolated_reload"
+  nft -s list ruleset >/tmp/home-before.rules
+  cp /var/lib/nginxx/backend-protection/manifest.json /tmp/home-before.manifest
+  nx_home_set "$site" /management.html
+  nx_backend_status "$site"
+  [[ "$(nx_home_status "$site")" == /management.html ]]
+  ! cmp -s /tmp/home-before.manifest /var/lib/nginxx/backend-protection/manifest.json
+  local_ok
+  blocked http://192.0.2.1:18317
+  nft -s list ruleset >/tmp/home-after.rules
+  cmp /tmp/home-before.rules /tmp/home-after.rules
+  cp "$site" /tmp/home-before.conf
+  cp /var/lib/nginxx/backend-protection/manifest.json /tmp/home-before.manifest
+  old_reload="$(declare -f reload_nginx_safe)"
+  reload_nginx_safe() { [[ -e /tmp/home-reload-failed ]] && { rm /tmp/home-reload-failed; eval "$old_reload"; reload_nginx_safe; return; }; touch /tmp/home-reload-failed; return 1; }
+  refuse nx_home_set "$site" /other.html
+  eval "$old_reload"
+  cmp "$site" /tmp/home-before.conf
+  cmp /var/lib/nginxx/backend-protection/manifest.json /tmp/home-before.manifest
+  nx_home_set "$site" ''
+  nx_backend_status "$site"
+  nft -s list ruleset >/tmp/home-after.rules
+  cmp /tmp/home-before.rules /tmp/home-after.rules
+  local_ok
+  refuse disable_conf proof.conf
+  refuse nx_transaction nx_move_conf "$site" "$CONF_DIR/renamed.conf"
+done
+echo 'PASS: protected homepage source/bundle fingerprint updates, unchanged live nft and reload rollback'
+
 nft -s list ruleset >/tmp/enabled.rules
 nx_site_access_menu "$site" <<< 1
 nft -s list ruleset >/tmp/repeated.rules

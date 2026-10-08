@@ -568,6 +568,107 @@ def inspect(filename, query=operation):
         servers = [n for n in nodes if n['args'] == ['server'] and n['children'] is not None]
         def directives(n, key): return [x for x in n['children'] if x['args'][0] == key]
         def unquote(s): return s[1:-1] if len(s)>1 and s[0] == s[-1] and s[0] in '\"\'' else s
+        if query in ('home-set', 'home-sync', 'home-strip', 'home-status'):
+            # Source offsets and parsed nodes establish ownership; marker-shaped
+            # strings/comments in other scopes never grant permission to erase.
+            values = metadata.get('nx_home_path', [])
+            if len(values) > 1: fail('duplicate homepage metadata')
+            old = values[0][2] if values else ''
+            target = params[0] if query == 'home-set' else old
+            def safe_path(value):
+                return len(value) <= 512 and re.fullmatch(r'/([A-Za-z0-9_-][A-Za-z0-9_.-]*/)*[A-Za-z0-9_-][A-Za-z0-9_.-]*/?', value)
+            if old and not safe_path(old): fail('unsafe homepage metadata')
+            if target and not safe_path(target): fail('unsafe homepage target')
+            edits = []
+            owned = []
+            owned_servers = []
+            begin = None
+            for line, start, end, level in comments:
+                marker = text[start:end].rstrip('\r\n')
+                if marker not in ('# nx-home-map-begin', '# nx-home-map-end'): continue
+                if level != 1 or text[line:start].strip(): fail('invalid homepage marker scope')
+                if marker == '# nx-home-map-begin':
+                    if begin is not None: fail('nested homepage marker')
+                    begin = (line, end)
+                else:
+                    if begin is None: fail('orphan homepage marker')
+                    matching = [(srv, n) for srv in servers for n in srv['children']
+                                if begin[1] <= n['start'] and n['end'] <= line]
+                    if len(matching) != 1: fail('homepage marker must contain exactly one location')
+                    srv, n = matching[0]
+                    expected = [['if', '($request_method', '!~', '^(GET|HEAD)$)'], ['rewrite', '^', old, 'last']]
+                    if (not old or n['args'] != ['location', '=', '/'] or n['children'] is None
+                        or [x['args'] for x in n['children']] != expected
+                        or [x['args'] for x in (n['children'][0]['children'] or [])] != [['return', '405']]
+                        or n['children'][1]['children'] is not None
+                        or text[begin[1]:n['start']].strip() or text[n['end']:line].strip()):
+                        fail('homepage managed block was changed; refusing to erase custom rules')
+                    owned.append(n)
+                    owned_servers.append(srv)
+                    remove_start = begin[0]-1 if begin[0] and text[begin[0]-1] == '\n' else begin[0]
+                    edits.append((remove_start, end, ''))
+                    begin = None
+            if begin is not None: fail('unterminated homepage marker')
+            if len(owned) > 1: fail('duplicate homepage block')
+            if query in ('home-status', 'home-set', 'home-strip') and bool(old) != bool(owned):
+                fail('homepage metadata/block mismatch')
+            if query == 'home-status':
+                print(old)
+                return
+            if query in ('home-strip', 'home-set'):
+                edits.extend((start, end, '') for start, end, _ in values)
+            if query not in ('home-strip',) and target:
+                if any(n['args'] != ['server'] or n['children'] is None for n in nodes):
+                    fail('homepage requires explicit server blocks only')
+                apps = []
+                for srv in servers:
+                    children = [n for n in srv['children'] if n not in owned]
+                    names = directives(srv, 'server_name')
+                    if len(names) != 1 or not names[0]['args'][1:] or any(
+                        not re.fullmatch(r'[A-Za-z0-9_-]+(?:\.[A-Za-z0-9_-]+)*\.?', unquote(x)) or unquote(x) == '_'
+                        for x in names[0]['args'][1:]): fail('unsupported homepage server names')
+                    if not directives(srv, 'listen'): fail('implicit homepage listener')
+                    root = [n for n in children if n['args'] == ['location', '/']]
+                    # Skip only an explicit generated HTTPS redirect layout.
+                    if len(root) == 1 and root[0]['children'] and len(root[0]['children']) == 1:
+                        args = root[0]['children'][0]['args']
+                        if (len(args) == 3 and args[:2] in (['return', '301'], ['return', '308'])
+                            and re.fullmatch(r'https://\$host(?::[0-9]+)?\$request_uri', args[2])
+                            and all(n['args'][0] in ('listen', 'server_name', 'location', 'if', 'set') for n in children)
+                            and all(n['args'][1:] == ['/'] or n['args'][1:] == ['^~', '/.well-known/acme-challenge/']
+                                    for n in children if n['args'][0] == 'location')): continue
+                    if any([unquote(x) for x in n['args']] == ['location', '=', '/'] for n in children): fail('existing unmanaged exact root location; remove it manually first')
+                    if any(n['args'][0] in ('include', 'rewrite', 'return', 'error_page') for n in children):
+                        fail('complex homepage server routing is unsupported')
+                    for n in children:
+                        if n['args'][0] != 'if': continue
+                        if (not n['children'] or not any(v in ' '.join(n['args']) for v in
+                            ('$nx_access_', '$host', '$http_host', '$scheme', '$ssl_server_name')) or
+                            any(x['children'] is not None or not (x['args'] == ['return', '444'] or
+                                len(x['args']) == 3 and x['args'][:2] == ['set', '$nx_access_sni'])
+                                for x in n['children'])):
+                            fail('custom server if is unsupported')
+                    if len(root) != 1 or root[0]['children'] is None: fail('expected one explicit business location /')
+                    # Includes/rewrites may hide a loop or alter root/API routing.
+                    for n in walk(children):
+                        if n['args'][0] in ('include', 'rewrite', 'error_page'):
+                            fail('complex includes/rewrites are unsupported for homepage mapping')
+                    apps.append(srv)
+                if len(apps) != 1: fail('expected exactly one business server')
+                if (target == old and len(owned) == 1 and owned_servers == apps):
+                    sys.stdout.write(text)
+                    return
+                block = ('\n    # nx-home-map-begin\n    location = / {\n'
+                         '        if ($request_method !~ ^(GET|HEAD)$) { return 405; }\n'
+                         '        rewrite ^ ' + target + ' last;\n'
+                         '    }\n    # nx-home-map-end\n')
+                edits.append((apps[0]['opening']+1, apps[0]['opening']+1, block))
+                if query == 'home-set':
+                    edits.append((len(text), len(text), ('\n' if text and not text.endswith('\n') else '') + '# nx_home_path=' + target + '\n'))
+            for start, end, value in sorted(edits, reverse=True):
+                text = text[:start] + value + text[end:]
+            sys.stdout.write(text)
+            return
         rows = []
         # Metadata and structural queries do not need resolvable listen sockets.
         # Inspection retains hostnames; defaults/security operations require IPs.

@@ -26,6 +26,9 @@ nx_transaction() (
   if [[ ( ${1:-} == nx_write_conf || ${1:-} == nx_write_conf_preserved ) && -n ${3:-} && ( -z ${4:-} || ${3:-} == "${4:-}" ) ]]; then
     NX_BACKEND_MUTABLE_PATH="$3"
   fi
+  if [[ ${1:-} == nx_home_set_files && -n ${2:-} ]]; then
+    NX_BACKEND_MUTABLE_PATH="$2"
+  fi
   # Read by ensure_websocket_map in nx.sh through Bash dynamic scope.
   # shellcheck disable=SC2034
   local NX_IN_TRANSACTION=1
@@ -123,7 +126,7 @@ nx_transaction() (
       _nx_backend_engine guard "$snapshot/conf" "$NX_DOMAIN_FILE"
     else nx_backend_guard_snapshot "$snapshot/conf" "${NX_BACKEND_MUTABLE_PATH:-}"; fi
   }
-  if nx_access_migrate_state && nx_transaction_domain_before && "$@" && nx_transaction_paths_safe && nx_acme_sync_routes && ensure_websocket_map && nx_access_sync_files &&
+  if nx_access_migrate_state && nx_transaction_domain_before && "$@" && nx_transaction_paths_safe && nx_acme_sync_routes && nx_home_sync_files && ensure_websocket_map && nx_access_sync_files &&
      nx_transaction_domain_after && nx_transaction_domain_guard &&
      { ! nx_transaction_changed || nx_transaction_reload; }; then
     trap - HUP INT TERM
@@ -147,8 +150,8 @@ nx_write_conf() {
   if [[ -n "$old" && -f "$old" ]]; then
     local metadata key value
     metadata="$(mktemp /tmp/nginxx-metadata-XXXXXX)" || return 1
-    nx_conf_query metadata-drop "$tmp" access_policy access_default > "$metadata" || { rm -f "$metadata"; return 1; }
-    for key in access_policy access_default; do
+    nx_conf_query metadata-drop "$tmp" access_policy access_default nx_home_path > "$metadata" || { rm -f "$metadata"; return 1; }
+    for key in access_policy access_default nx_home_path; do
       value="$(conf_meta_get "$old" "$key")" || { rm -f "$metadata"; return 1; }
       if [[ "$key" == access_default && -n "$value" ]]; then
         local before after

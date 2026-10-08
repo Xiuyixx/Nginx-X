@@ -15,7 +15,7 @@ NC='\033[0m'
 
 # ---------- 全局变量 ----------
 APP_NAME="Nginx-X"
-APP_VERSION="3.3.0"
+APP_VERSION="3.4.0"
 # Alpine 的 nginx 把 server 配置放在 http.d，其他系统用 conf.d
 if [[ -f /etc/nginx/http.d ]] || [[ -d /etc/nginx/http.d ]]; then
   CONF_DIR="/etc/nginx/http.d"
@@ -970,9 +970,12 @@ conf_safe_for_template_rebuild() {
   [[ -z "$servers" ]] && servers=0
   (( servers <= 2 )) || return 1
 
-  if conf_has_custom_locations "$conf_file"; then
-    return 1
-  fi
+  local clean rc=0
+  clean="$(mktemp)" || return 1
+  nx_conf_query home-strip "$conf_file" > "$clean" || { rm -f "$clean"; return 1; }
+  if conf_has_custom_locations "$clean"; then rc=1; fi
+  rm -f "$clean"
+  (( rc == 0 )) || return 1
 
   return 0
 }
@@ -1746,8 +1749,9 @@ config_file_action_menu() {
     echo "4) 编辑"
     echo "5) 删除"
     echo "6) 仅域名访问"
-    echo "7) HTTPS 开关"
-    echo "8) 站点健康检查"
+    echo "7) 首页路径映射"
+    echo "8) HTTPS 开关"
+    echo "9) 站点健康检查"
     echo "0) 返回上一级"
     echo "============================"
     read -rp "请选择: " c || return 0
@@ -1759,10 +1763,11 @@ config_file_action_menu() {
       4) run_menu_action edit_conf_manual "$file"; pause; return 0 ;;
       5) run_menu_action delete_conf "$file"; pause; return 0 ;;
       6) run_menu_action nx_site_access_menu "$CONF_DIR/$file"; pause ;;
-      7) run_menu_action nx_site_https_toggle "$CONF_DIR/$file"; pause ;;
-      8) run_menu_action health_check_conf_file "$CONF_DIR/$file"; pause ;;
+      7) run_menu_action nx_home_menu "$CONF_DIR/$file"; pause ;;
+      8) run_menu_action nx_site_https_toggle "$CONF_DIR/$file"; pause ;;
+      9) run_menu_action health_check_conf_file "$CONF_DIR/$file"; pause ;;
       0) return 0 ;;
-      *) warn "无效输入。请输入 0-8 之间的菜单编号。"; pause ;;
+      *) warn "无效输入。请输入 0-9 之间的菜单编号。"; pause ;;
     esac
   done
 }

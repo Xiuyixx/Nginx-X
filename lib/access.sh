@@ -6,6 +6,64 @@
 # Shared policy is data, never shell code. Personal email/DNS credentials stay
 # in STATE_DIR. On first use preserve any deployed legacy strict policy even
 # when the first administrator has no personal legacy state.
+
+# Root path mapping is deliberately narrow: one literal, site-local path,
+# rendered as a managed exact location. It is not a general redirect facility.
+nx_home_validate_path() {
+  [[ "$1" =~ ^/([A-Za-z0-9_-][A-Za-z0-9_.-]*/)*[A-Za-z0-9_-][A-Za-z0-9_.-]*/?$ && ${#1} -le 512 ]] || {
+    nx_access_error '首页目标须为站内绝对路径（例如 /management.html），仅允许 ASCII 字母、数字、下划线、连字符、点和单斜杠；不能是 /、点路径段、编码、查询或片段。'; return 1;
+  }
+}
+
+nx_home_set_files() {
+  local file="$1" value="$2" stage
+  nx_conf_path_allowed "$file" || return 1
+  nx_access_assert_managed_site "$file" || return 1
+  [[ -z "$value" ]] || nx_home_validate_path "$value" || return 1
+  stage="$(mktemp)" || return 1
+  nx_conf_query home-set "$file" "$value" > "$stage" || { rm -f "$stage"; return 1; }
+  ${SUDO:-} tee "$file" < "$stage" >/dev/null || { rm -f "$stage"; return 1; }
+  rm -f "$stage"
+}
+nx_home_set() { nx_transaction nx_home_set_files "$@"; }
+
+nx_home_sync_files() {
+  local file path stage
+  while IFS= read -r file; do
+    # Fast absence check avoids one Python process per unrelated site. False
+    # positives still go through the structural parser; it owns all decisions.
+    grep -qE 'nx_home_path=|nx-home-map-(begin|end)' "$file" || continue
+    path="$(conf_meta_get "$file" nx_home_path)" || return 1
+    [[ -n "$path" ]] || { nx_conf_query home-status "$file" >/dev/null || return 1; continue; }
+    stage="$(mktemp)" || return 1
+    if ! nx_conf_query home-sync "$file" > "$stage"; then rm -f "$stage"; return 1; fi
+    if ! cmp -s "$file" "$stage"; then
+      ${SUDO:-} tee "$file" < "$stage" >/dev/null || { rm -f "$stage"; return 1; }
+    fi
+    rm -f "$stage"
+  done < <(list_managed_conf_files 1)
+}
+
+
+nx_home_status() { nx_conf_query home-status "$1"; }
+
+nx_home_menu() {
+  local file="$1" c current value
+  current="$(nx_home_status "$file")" || return 1
+  echo "首页路径映射：${current:-关闭}"
+  echo '1) 设置/修改'
+  echo '2) 关闭'
+  echo '0) 返回'
+  echo '仅对真实业务 server 的 GET/HEAD 根路径生效；其他方法访问 / 返回 405（不会转入管理页面）；ACME、其他 API 和查询参数不变。'
+  read -rp '请选择: ' c || return 1
+  case "$c" in
+    1) read -rp '输入站内绝对目标路径（例如 /management.html）: ' value || return 1
+       nx_home_set "$file" "$value" && info "首页路径映射已设置为 $value" ;;
+    2) nx_home_set "$file" '' && info '首页路径映射已关闭。' ;;
+    0) return 0 ;;
+    *) warn '无效输入。'; return 1 ;;
+  esac
+}
 domain_only_state_is_enabled() {
   if [[ -f "$DOMAIN_ONLY_STATE" ]]; then
     grep -qx 'DOMAIN_ONLY=1' "$DOMAIN_ONLY_STATE"
