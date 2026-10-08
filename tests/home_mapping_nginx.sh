@@ -92,8 +92,8 @@ check_requests() {
  for method in POST PUT DELETE OPTIONS PATCH; do
   [[ "$(request -X "$method" -o /dev/null -w '%{http_code}')" == 405 ]]
  done
- path='/v1/chat?key=abc'; [[ "$(request)" == 'GET|/v1/chat|key=abc' ]]
- [[ "$(request -X POST -d payload)" == 'POST|/v1/chat|key=abc' ]]
+ path='/v1/chat?item=fixture'; [[ "$(request)" == 'GET|/v1/chat|item=fixture' ]]
+ [[ "$(request -X POST -d payload)" == 'POST|/v1/chat|item=fixture' ]]
  path='/.well-known/acme-challenge/proof'; [[ "$(request)" == acme-proof ]]
  path='/'; [[ "$(request -D "$root/headers")" == 'GET|/management.html|' ]]
  if grep -qi '^Location:' "$root/headers"; then exit 1; fi
