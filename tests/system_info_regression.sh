@@ -45,7 +45,54 @@ for entry in "$root/nx.sh" "$T/bundle"; do
   if grep -qE 'abcd|SECRET|LONG-KEY' "$T/panel"; then exit 1; fi
   [[ ! -e "$T/pwned" && ! -e "$T/mutation" && "$before" == "$(sha256sum "$DNS_CONF")" ]]
   main_menu > "$T/menu"
-  grep -q '^5) 更新脚本' "$T/menu"; grep -q '^6) 卸载' "$T/menu"; grep -q '^7) 系统信息' "$T/menu"
+  grep -q '^4) 实时信息' "$T/menu"
+  grep -q '^5) 更新脚本' "$T/menu"; grep -q '^6) 卸载' "$T/menu"
+  grep -q '^7)' "$T/menu" && exit 1
+
+  # Drive the actual main -> 4 -> original submenu choices -> return path.
+  # Stub only host initialization and leaf actions; keep real menu dispatch,
+  # panel and input handling. A clear marker verifies each complete redraw.
+  (
+    ensure_dirs() { :; }
+    ensure_runtime_dependencies() { :; }
+    ensure_websocket_map() { :; }
+    nx_migrate_certificate_renewal() { :; }
+    banner() { echo MAIN; }
+    clear() { echo CLEAR; }
+    pause() { echo UNEXPECTED_PAUSE; return 99; }
+    require_nginx_installed() { echo UNEXPECTED_GATE; return 99; }
+    show_nginx_realtime_status() { echo ACTION_REALTIME; }
+    show_traffic_stats() { echo ACTION_TRAFFIC; }
+    site_health_menu() { echo ACTION_HEALTH; }
+    main <<< $'4\n1\n2\n3\n0\n0'
+  ) > "$T/interaction"
+  python3 - "$T/interaction" <<'PY'
+import pathlib, sys
+text = pathlib.Path(sys.argv[1]).read_text()
+assert 'UNEXPECTED_' not in text and '\n7)' not in text
+frames = text.split('CLEAR\n')[1:]
+assert len(frames) == 4, text
+for frame in frames:
+    assert frame.index('系统信息（只读）') < frame.index('系统: Test OS') < frame.index('1) 实时信息')
+    assert frame.index('1) 实时信息') < frame.index('2) 流量统计') < frame.index('3) 健康检查') < frame.index('0) 返回上一级')
+    assert all(secret not in frame for secret in ('abcd', 'SECRET', 'LONG-KEY'))
+for action in ('ACTION_REALTIME', 'ACTION_TRAFFIC', 'ACTION_HEALTH'):
+    assert text.count(action) == 1, text
+PY
+  # A failed optional panel must not hide choices, consume input or pause.
+  (
+    clear() { echo CLEAR; }
+    pause() { echo UNEXPECTED_PAUSE; return 99; }
+    system_info_panel() { echo PANEL_FAILED; return 1; }
+    show_nginx_realtime_status() { echo ACTION_REALTIME; }
+    show_traffic_stats() { echo ACTION_TRAFFIC; }
+    site_health_menu() { echo ACTION_HEALTH; }
+    realtime_info_menu <<< $'1\n2\n3\n0'
+  ) > "$T/failure"
+  [[ "$(grep -c '^PANEL_FAILED' "$T/failure")" == 4 ]]
+  for action in REALTIME TRAFFIC HEALTH; do grep -q "^ACTION_$action" "$T/failure"; done
+  grep -q UNEXPECTED_PAUSE "$T/failure" && exit 1
+  [[ ! -e "$T/pwned" && ! -e "$T/mutation" && "$before" == "$(sha256sum "$DNS_CONF")" ]]
 )
 done
-echo 'PASS read-only source/bundle panel, malicious state not executed, short/long keys fully hidden and stable menu numbering'
+echo 'PASS source/bundle main -> 4 panel-first redraws, original actions, failure fallback, no extra pause or menu 7, read-only hidden keys'

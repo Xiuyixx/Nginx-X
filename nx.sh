@@ -2441,13 +2441,12 @@ cert_menu() {
 
 # ---------- 功能6：流量统计与状态 ----------
 realtime_info_menu() {
-  require_nginx_installed || {
-    pause
-    return 0
-  }
-
   while true; do
     clear
+    echo "========== 系统信息（只读） =========="
+    if ! system_info_panel; then
+      warn "部分系统信息无法读取，仍可选择下方实时信息功能。"
+    fi
     echo "========== 实时信息 =========="
     echo "1) 实时信息"
     echo "2) 流量统计"
@@ -2793,7 +2792,6 @@ main_menu() {
   echo "4) 实时信息"
   echo "5) 更新脚本"
   echo "6) 卸载"
-  echo "7) 系统信息（只读）"
   echo "0) 退出"
   echo "========================================"
 }
@@ -2816,9 +2814,8 @@ main() {
       4) realtime_info_menu ;;
       5) NX_IN_MENU=1 run_menu_action update_script; NX_IN_MENU=0; [[ "${NX_UPDATE_HUP:-0}" != 1 ]] || return 129; [[ -t 0 && -t 1 ]] || return 0; pause ;;
       6) uninstall_menu ;;
-      7) run_menu_action system_info_panel; pause ;;
       0) info "已退出 ${APP_NAME}。"; exit 0 ;;
-      *) warn "无效输入，请输入主菜单中的编号（0-7）。"; pause ;;
+      *) warn "无效输入，请输入主菜单中的编号（0-6）。"; pause ;;
     esac
   done
 }
