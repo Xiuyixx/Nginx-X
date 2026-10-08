@@ -348,6 +348,13 @@ try:
         # Refuse aliases not covered by the selected certificate; never silently
         # drop names or request additional certificates on the user's behalf.
         certfile = preserved_cert if preserved else ssl_dir.rstrip('/') + '/' + domain + '/fullchain.pem'
+        if tls:
+            actual = directives(app, 'ssl_certificate')
+            if len(actual) != 1 or len(actual[0]['args']) != 2:
+                fail('ambiguous existing certificate path')
+            certfile = actual[0]['args'][1].strip("\"'")
+            if not os.path.isabs(certfile) or '$' in certfile or '\\' in certfile:
+                fail('unsupported existing certificate path')
         for alias in aliases:
             if not re.fullmatch(r'[A-Za-z0-9.-]+', alias):
                 fail('certificate coverage cannot be established for server_name: ' + alias)
@@ -468,14 +475,14 @@ PY
 nx_https_apply() {
   local operation="$1" domain="$2" conf_file="$3" requested="${4:-}" tmp rc=0
   [[ -f "$conf_file" ]] || { error "配置文件不存在：${conf_file}"; return 1; }
-  if [[ "$operation" == enable ]] && [[ ! -f "${SSL_DIR}/${domain}/fullchain.pem" || ! -f "${SSL_DIR}/${domain}/privkey.pem" ]]; then
+  if [[ "$operation" == enable ]] && ! conf_https_enabled "$conf_file" && [[ ! -f "${SSL_DIR}/${domain}/fullchain.pem" || ! -f "${SSL_DIR}/${domain}/privkey.pem" ]]; then
     error "未找到证书文件：${SSL_DIR}/${domain}/"
     return 1
   fi
   tmp="$(mktemp /tmp/nginxx-https-preserve-XXXXXX)" || return 1
   if nx_https_transform "$operation" "$conf_file" "$domain" "$SSL_DIR" "$requested" > "$tmp"; then
     if ! cmp -s "$tmp" "$conf_file"; then
-      apply_conf_with_rollback "$tmp" "$conf_file" || rc=$?
+      apply_conf_preserved_with_rollback "$tmp" "$conf_file" || rc=$?
     fi
   else
     rc=$?

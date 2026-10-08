@@ -219,6 +219,67 @@ rc=0
 curl --noproxy '*' -sS --max-time 2 http://127.0.0.1:18080 -H 'Host: wrong.example' >/tmp/wrong 2>/dev/null || rc=$?
 [[ $rc == 52 && ! -s /tmp/wrong ]]
 echo 'PASS: native INPUT v4/v6 and pre-DNAT v4 blocked; local nginx exact Host works; wrong Host is real 444'
+# In-place HTTPS changes keep protection live and refresh only the site's
+# fingerprint. Exercise the real menu action, source AND installed bundle.
+SSL_DIR=/etc/nginx/ssl
+mkdir -p "$SSL_DIR/proof.example"
+openssl req -x509 -newkey rsa:2048 -nodes -days 1 -subj /CN=proof.example \
+  -addext subjectAltName=DNS:proof.example -keyout "$SSL_DIR/proof.example/privkey.pem" \
+  -out "$SSL_DIR/proof.example/fullchain.pem" >/dev/null 2>&1
+# User customization: root rewrite must remain inside its exact location.
+cp "$site" /tmp/custom-source
+sed '/location \/ {/i\    location = / { rewrite ^ /management.html last; }' /tmp/custom-source >/tmp/custom-edit
+apply_conf_with_rollback /tmp/custom-edit "$site" "$site"
+ensure_cert_for_domain_interactive() { return 0; }
+https_ok() {
+  for _ in {1..100}; do
+    if [[ "$(curl --noproxy '*' -kfsS --max-time 2 --resolve proof.example:18443:127.0.0.1 https://proof.example:18443/ 2>/dev/null)" == backend-proof ]]; then return 0; fi
+    sleep .03
+  done
+  return 1
+}
+bash /work/tools/build-bundle.sh /tmp/nx-bundle
+isolated_reload="$(declare -f reload_nginx_safe)"
+for implementation in /work/nx.sh /tmp/nx-bundle; do
+  source "$implementation"
+  eval "$isolated_reload"
+  nft -s list ruleset >/tmp/tls-before.rules
+  # Menu 7 chooses the production toggle; explicit port for isolated requests.
+  enable_https_for_conf_file proof.example "$site" 18443
+  https_ok
+  nx_backend_status "$site"
+  grep -Fq 'location = / { rewrite ^ /management.html last; }' "$site"
+  blocked http://192.0.2.1:18317
+  blocked 'http://[2001:db8:1::1]:18317'
+  nft -s list ruleset >/tmp/tls-after.rules
+  cmp /tmp/tls-before.rules /tmp/tls-after.rules
+  # A reload failure after fingerprint refresh restores both exact objects.
+  cp "$site" /tmp/tls-before.conf
+  cp /var/lib/nginxx/backend-protection/manifest.json /tmp/tls-before.manifest
+  old_reload="$(declare -f reload_nginx_safe)"
+  reload_nginx_safe() { [[ -e /tmp/reload-failed ]] && { rm /tmp/reload-failed; eval "$old_reload"; reload_nginx_safe; return; }; touch /tmp/reload-failed; return 1; }
+  run_menu_action nx_site_https_toggle "$site"
+  eval "$old_reload"
+  cmp "$site" /tmp/tls-before.conf
+  cmp /var/lib/nginxx/backend-protection/manifest.json /tmp/tls-before.manifest
+  https_ok
+  nx_site_https_toggle "$site"
+  for _ in {1..100}; do local_ok && break; sleep .03; done
+  local_ok
+  nx_backend_status "$site"
+  grep -Fq 'location = / { rewrite ^ /management.html last; }' "$site"
+  # Do not authorize backend changes or lifecycle identity changes.
+  sed 's/127.0.0.1:18317/127.0.0.1:18318/' "$site" >/tmp/changed-target
+  cp "$site" /tmp/edit-before
+  refuse apply_conf_with_rollback /tmp/changed-target "$site" "$site"
+  cmp "$site" /tmp/edit-before
+  refuse disable_conf proof.conf
+  confirm() { return 0; }
+  refuse delete_conf proof.conf
+  refuse nx_transaction nx_move_conf "$site" "$CONF_DIR/renamed.conf"
+  nx_backend_status "$site"
+done
+echo 'PASS: protected HTTPS source/bundle on/off, exact root rewrite, live dual-stack nft unchanged, reload rollback and unsafe mutation veto'
 nft -s list ruleset >/tmp/enabled.rules
 nx_site_access_menu "$site" <<< 1
 nft -s list ruleset >/tmp/repeated.rules

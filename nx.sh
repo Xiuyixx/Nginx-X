@@ -609,7 +609,10 @@ install_nginx_official() {
 
   # Packages and service enable/start are not rollbackable. Snapshot only the
   # default-site adjustment, after detecting the package's actual include dir.
-  if [[ -d /etc/nginx/http.d ]]; then
+  if [[ -z ${NX_CONF_DIR+x} && -d /etc/nginx/http.d ]]; then
+    if [[ "$DOMAIN_ONLY_STATE" == "$CONF_DIR/.nx-access-state" ]]; then
+      DOMAIN_ONLY_STATE="/etc/nginx/http.d/.nx-access-state"
+    fi
     CONF_DIR="/etc/nginx/http.d"
     ensure_dirs || return 1
   fi

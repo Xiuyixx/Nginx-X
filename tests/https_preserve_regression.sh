@@ -31,7 +31,7 @@ openssl req -x509 -newkey rsa:2048 -nodes -days 1 -subj /CN=example.com -addext 
 # Exercise the transformation through its public API, with real syntax validation.
 # The shared transaction helper's rollback mechanics have their own regression suite.
 apply_count=0
-apply_conf_with_rollback() {
+apply_conf_preserved_with_rollback() {
   local candidate="$1" target="$2"
   apply_count=$((apply_count + 1))
   [[ "${FAIL_APPLY:-0}" != 1 ]] || return 1
@@ -268,6 +268,33 @@ nx_access_set_default "$conf" '0.0.0.0:80,0.0.0.0:18443'
 disable_https_for_conf_file example.com "$conf"
 grep -q '^# access_default=0.0.0.0:80$' "$conf"
 echo 'ok: strict policy, explicit default, and HTTPS round trip'
+# Preservative HTTPS publication must keep existing attributes, not install
+# a fresh root:root 0644 file. Metadata migration still occurs exactly once.
+for mode in 0600 0640; do
+  chmod "$mode" "$conf"
+  before_attributes="$(stat -c '%a:%u:%g' "$conf")"
+  enable_https_for_conf_file example.com "$conf" 18443
+  [[ "$(stat -c '%a:%u:%g' "$conf")" == "$before_attributes" ]]
+  disable_https_for_conf_file example.com "$conf"
+  [[ "$(stat -c '%a:%u:%g' "$conf")" == "$before_attributes" ]]
+done
+# Already-TLS sites use their actual custom certificate, even if the default
+# SSL directory is empty; spaces in quoted paths remain intact.
+custom="$TEST_ROOT/custom certificate"
+mkdir -p "$custom"
+cp "$SSL_DIR/example.com/"*.pem "$custom/"
+enable_https_for_conf_file example.com "$conf" 18443
+sed -i "s@${SSL_DIR}/example.com/fullchain.pem@\"$custom/fullchain.pem\"@;s@${SSL_DIR}/example.com/privkey.pem@\"$custom/privkey.pem\"@" "$conf"
+old_ssl="$SSL_DIR"; SSL_DIR="$TEST_ROOT/empty-ssl"
+cp "$conf" "$TEST_ROOT/custom-before"
+enable_https_for_conf_file example.com "$conf"
+cmp "$conf" "$TEST_ROOT/custom-before"
+printf broken > "$custom/fullchain.pem"
+if enable_https_for_conf_file example.com "$conf" >/dev/null 2>&1; then exit 1; fi
+cmp "$conf" "$TEST_ROOT/custom-before"
+SSL_DIR="$old_ssl"
+disable_https_for_conf_file example.com "$conf"
+echo 'ok: actual custom certificate paths and original mode/uid/gid preserved'
 
 # Unsupported alias coverage must refuse before any apply, preserving aliases.
 cp "$conf" "$TEST_ROOT/uncovered.conf"

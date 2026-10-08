@@ -75,6 +75,30 @@ for failure in mv backup reload dangling; do
   if [[ $failure == backup ]]; then [[ $(cat "$CONF_DIR/default.conf.bak") == 'old backup' ]] || fail 'backup overwritten'; rm "$CONF_DIR/default.conf.bak"; fi
  )
 done
+# Simulate a package creating Alpine's include directory without exposing any
+# host path. Verify explicit override and default shared-state rebasing.
+for explicit in yes no custom-state; do
+ (
+  package_conf="$root/package-$explicit"; mkdir "$package_conf"
+  original_conf="$CONF_DIR"
+  eval "$(declare -f install_nginx_official | sed 's@'"$CONF_DIR"'@'"$package_conf"'@g')"
+  ensure_runtime_dependencies(){ :; }; ensure_dirs(){ mkdir -p "$CONF_DIR"; }
+  detect_os_id(){ echo alpine; }; detect_pkg_mgr(){ echo apk; }
+  check_cmd(){ return 1; }; apk(){ :; }; ensure_acme_installed(){ :; }
+  reload_nginx_safe(){ :; }
+  if [[ $explicit == no ]]; then unset NX_CONF_DIR; fi
+  if [[ $explicit == custom-state ]]; then unset NX_CONF_DIR; DOMAIN_ONLY_STATE="$root/explicit-policy"; fi
+  install_nginx_official > "$root/dir-$explicit.log"
+  if [[ $explicit == yes ]]; then
+   [[ "$CONF_DIR" == "$original_conf" && "$DOMAIN_ONLY_STATE" == "$original_conf/.nx-access-state" ]]
+  elif [[ $explicit == no ]]; then
+   [[ "$CONF_DIR" == "$package_conf" && "$DOMAIN_ONLY_STATE" == "$package_conf/.nx-access-state" ]]
+  else
+   [[ "$CONF_DIR" == "$package_conf" && "$DOMAIN_ONLY_STATE" == "$root/explicit-policy" ]]
+  fi
+ )
+done
+echo 'PASS installation include-dir overrides and shared policy rebasing'
 # BusyBox mv supports -T as well; check the native applet when present (Alpine CI).
 if command -v busybox >/dev/null; then
  printf stage > "$root/busy-stage"

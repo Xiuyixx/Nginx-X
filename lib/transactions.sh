@@ -19,6 +19,13 @@ nx_transaction() (
   nx_transaction_paths_safe || return 1
 
   local snapshot rc=0 state_existed=0 main_existed=0 main_target=""
+  local NX_BACKEND_MUTABLE_PATH=""
+  # In-place HTTPS/edit transformations may legitimately change a protected
+  # site's bytes.  The backend guard may refresh only this exact target, never
+  # a rename, disable, delete, or a second file.
+  if [[ ( ${1:-} == nx_write_conf || ${1:-} == nx_write_conf_preserved ) && -n ${3:-} && ( -z ${4:-} || ${3:-} == ${4:-} ) ]]; then
+    NX_BACKEND_MUTABLE_PATH="$3"
+  fi
   # Read by ensure_websocket_map in nx.sh through Bash dynamic scope.
   # shellcheck disable=SC2034
   local NX_IN_TRANSACTION=1
@@ -44,7 +51,7 @@ nx_transaction() (
     fi
   fi
   local backend_checkpoint=0
-  if [[ -n ${NX_DOMAIN_ACTION:-} ]]; then
+  if [[ -n ${NX_DOMAIN_ACTION:-} || -n "$NX_BACKEND_MUTABLE_PATH" && -d "${NX_BACKEND_STATE_DIR:-/var/lib/nginxx/backend-protection}" ]]; then
     mkdir -m 700 "$snapshot/backend" || { ${SUDO} rm -rf "$snapshot"; return 1; }
     if ! _nx_backend_engine checkpoint "$snapshot/backend"; then
       error '无法备份后端保护；未执行组合操作。'
@@ -114,7 +121,7 @@ nx_transaction() (
   nx_transaction_domain_guard() {
     if [[ ${NX_DOMAIN_ACTION:-} == enable ]]; then
       _nx_backend_engine guard "$snapshot/conf" "$NX_DOMAIN_FILE"
-    else nx_backend_guard_snapshot "$snapshot/conf"; fi
+    else nx_backend_guard_snapshot "$snapshot/conf" "${NX_BACKEND_MUTABLE_PATH:-}"; fi
   }
   if nx_access_migrate_state && nx_transaction_domain_before && "$@" && nx_transaction_paths_safe && nx_acme_sync_routes && ensure_websocket_map && nx_access_sync_files &&
      nx_transaction_domain_after && nx_transaction_domain_guard &&
@@ -164,6 +171,21 @@ nx_write_conf() {
   if [[ -n "$old" && "$old" != "$target" ]]; then
     ${SUDO} rm -f "$old" || return 1
   fi
+}
+
+# A structural transformer has already migrated metadata/default sockets.
+# Publish its exact candidate without re-migrating them or replacing attributes.
+nx_write_conf_preserved() {
+  nx_conf_path_allowed "$2" || return 1
+  [[ -f "$2" ]] || return 1
+  nx_acme_retain_conf_route "$2" || return 1
+  ${SUDO} tee "$2" < "$1" >/dev/null || return 1
+  ensure_ssl_directives_present "$2"
+}
+
+apply_conf_preserved_with_rollback() {
+  nx_conf_path_allowed "$2" || return 1
+  nx_transaction nx_write_conf_preserved "$@"
 }
 
 apply_conf_with_rollback() {

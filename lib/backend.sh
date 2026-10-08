@@ -29,7 +29,7 @@ nx_backend_status() {
 }
 nx_backend_guard_snapshot() {
   [[ -d "${NX_BACKEND_STATE_DIR:-/var/lib/nginxx/backend-protection}" ]] || return 0
-  _nx_backend_engine guard "${1:?snapshot conf directory required}"
+  _nx_backend_engine guard "${1:?snapshot conf directory required}" "${2:-}"
 }
 nx_backend_uninstall_guard() {
   [[ -d "${NX_BACKEND_STATE_DIR:-/var/lib/nginxx/backend-protection}" ]] || return 0
@@ -488,9 +488,20 @@ try:
             sys.exit(0)
         if action=='guard':
             snap=pathlib.Path(operands[0]); need(snap.is_dir() and not snap.is_symlink(),'invalid snapshot directory')
+            refreshed=json.loads(json.dumps(manifest)) if manifest else None
             for path,s in sites.items():
                 p=pathlib.Path(path); before=read_site(snap/p.name, snapshot=True); after=read_site(p)
-                need((before==after or (held and len(operands)>1 and operands[1]==path)) and digest(after)==s['sha256'], 'protected site changed/deleted/renamed/disabled: '+path)
+                combined=held and len(operands)>1 and operands[1]==path
+                if combined and digest(after)!=s['sha256']:
+                    # Only a locked in-place mutation whose starting bytes match
+                    # the manifest may refresh its fingerprint. Keep the same
+                    # literal proxy targets and materially strict server guards.
+                    need(digest(before)==s['sha256'], 'protected site had pre-existing drift: '+path)
+                    need(targets(before.decode())==targets(after.decode())==s['ports'],
+                         'protected backend targets changed: '+path)
+                    refreshed['sites'][path]['sha256']=digest(after)
+                else:
+                    need((before==after or combined) and digest(after)==s['sha256'], 'protected site changed/deleted/renamed/disabled: '+path)
             protected={p for s in sites.values() for p in s['ports']}
             if protected:
                 nft=binary('nft')
@@ -501,6 +512,8 @@ try:
                 # Expanded config also catches frontends outside CONF_DIR.
                 dump=run([binary('nginx'),'-T','-c',str(main)]).stdout
                 need(not listens(dump)&protected,'expanded nginx configuration collides with protected ports')
+            if refreshed != manifest:
+                atomic(manifestpath,(json.dumps(refreshed,sort_keys=True)+'\n').encode())
             sys.exit(0)
         need(not pathlib.Path('/run/ufw').is_dir(),'ufw runtime state present')
         nft=binary('nft'); systemctl=binary('systemctl'); manager_check(systemctl)
