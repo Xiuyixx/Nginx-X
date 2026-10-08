@@ -310,6 +310,8 @@ bash tools/build-bundle.sh /tmp/nx-bundle
 
 真实请求测试需要 `nginx`、Python 3、OpenSSL 和 curl；可通过 `NGINX_BIN` 指定隔离二进制。非特权测试在 source 前统一设置独占临时配置、证书、状态及主配置路径；真实请求测试使用临时 PID、日志和高位端口，不操作系统 Nginx 服务。CI 在 Ubuntu 22.04、Ubuntu 24.04 和 Alpine 3.22 中安装依赖并运行回归，覆盖 mock 回滚、真实 HTTP/TLS 请求、IPv6、ACME、默认站点和 HTTPS 保留。Ubuntu 任务还检查全部源码及生成 bundle 的 ShellCheck。OpenWrt/CentOS 的完整实机生命周期不在当前 CI 覆盖范围内。
 
+HTTP-01 在途路由由每域名进程租约保护；其他配置操作不会清除仍在签发的挑战入口。正常失败会清理，进程被强杀后在下一次配置事务回收；稳定租约文件保留，不代表仍在签发。证书部署/续期发布与配置事务共用配置锁（SSL → CONF），验证、重载和回滚期间串行化。在线卸载会检查完整 ACME 账户删除范围的生效引用；无法确定引用时拒绝删除。
+
 证书权限说明：普通用户保留自己的 ACME 账户与 API 凭据；受保护的部署程序负责安装私钥并重载服务。签发及自定义 hook 仍以原用户身份执行，续期调度不依赖交互 sudo 缓存，也不添加 NOPASSWD 规则。新增的 ACME 身份与生命周期测试只能在一次性容器中开启 `NX_ACME_ISOLATED=1`，不要在实际服务器直接执行这些隔离测试。CI 使用独立容器分别执行两项验证。
 
 ### 自更新交接与信号边界

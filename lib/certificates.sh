@@ -244,11 +244,24 @@ _issue_cert_dns() {
   info "证书申请并安装成功（DNS-01）。"
 }
 
-_issue_cert_http() {
+# Dynamic pending state and EXIT cleanup intentionally live in this subshell.
+# shellcheck disable=SC2030,SC2317
+_issue_cert_http() (
   # 原有的 HTTP-01 逻辑
   local domain="$1"
   valid_domain "$domain" || return 1
-  local challenge_conf="" NX_ACME_PENDING="$domain"
+  local NX_ACME_PENDING="$domain" lease_fd lease_path
+  lease_path="$(nx_acme_lease_path "$domain")" || return 1
+  exec {lease_fd}<"$lease_path" || return 1
+  flock -x "$lease_fd" || return 1
+  # Process exit (including signals) releases the lease. Reconciliation then
+  # removes unsuccessful routes; SIGKILL is recovered on the next transaction.
+  nx_http_issue_cleanup() {
+    exec {lease_fd}<&-
+    NX_ACME_PENDING='' nx_transaction nx_acme_sync_routes || true
+  }
+  trap nx_http_issue_cleanup EXIT
+  trap 'exit 1' HUP INT TERM
 
   # Prerequisites must fail before publishing any challenge helper/marker.
   ensure_acme_installed || return 1
@@ -264,8 +277,6 @@ _issue_cert_http() {
   if (( pre_rc != 0 )); then
     if [[ $pre_rc -eq 10 ]]; then
       if ! confirm "自检存在风险，是否仍继续申请证书？"; then
-        cleanup_http_challenge_server "$challenge_conf"
-        reload_nginx_safe || true
         info "已取消申请。"
         return 1
       fi
@@ -274,15 +285,11 @@ _issue_cert_http() {
       if has_dns_config; then
         warn "HTTP-01 自检失败，是否改用 DNS-01 方式申请？"
         if confirm "使用 DNS-01 方式？"; then
-          cleanup_http_challenge_server "$challenge_conf"
-          reload_nginx_safe || true
           _issue_cert_dns "$domain"
           return $?
         fi
       fi
       if ! confirm "自检失败（建议先修复），是否仍强制继续申请？"; then
-        cleanup_http_challenge_server "$challenge_conf"
-        reload_nginx_safe || true
         info "已取消申请。"
         return 1
       fi
@@ -291,14 +298,12 @@ _issue_cert_http() {
   fi
 
   note "开始为 ${domain} 申请证书（HTTP 验证）..."
-  "$HOME/.acme.sh/acme.sh" --set-default-ca --server letsencrypt >/dev/null 2>&1 || true
-  "$HOME/.acme.sh/acme.sh" --register-account -m "$ACME_EMAIL" >/dev/null 2>&1 || true
+  (exec {lease_fd}<&-; "$HOME/.acme.sh/acme.sh" --set-default-ca --server letsencrypt >/dev/null 2>&1) || true
+  (exec {lease_fd}<&-; "$HOME/.acme.sh/acme.sh" --register-account -m "$ACME_EMAIL" >/dev/null 2>&1) || true
 
   local issue_output retry_after
-  issue_output="$("$HOME/.acme.sh/acme.sh" --issue -d "$domain" --webroot /usr/share/nginx/html 2>&1)" || {
+  issue_output="$(exec {lease_fd}<&-; "$HOME/.acme.sh/acme.sh" --issue -d "$domain" --webroot /usr/share/nginx/html 2>&1)" || {
     echo "$issue_output"
-    cleanup_http_challenge_server "$challenge_conf"
-    reload_nginx_safe || true
 
     if echo "$issue_output" | grep -qi 'rateLimited\|too many certificates'; then
       retry_after="$(echo "$issue_output" | sed -n 's/.*retry after \([^:]*UTC\).*/\1/p' | head -n1)"
@@ -315,10 +320,10 @@ _issue_cert_http() {
   }
 
   # Keep the challenge endpoint: acme.sh persists this webroot for renewals.
-  nx_deploy_certificate "$domain" || return 1
-  ensure_acme_cron || return 1
+  (exec {lease_fd}<&-; nx_deploy_certificate "$domain") || return 1
+  (exec {lease_fd}<&-; ensure_acme_cron) || return 1
   info "证书申请并安装成功。"
-}
+)
 
 load_email() {
   ensure_state_dir
@@ -406,18 +411,29 @@ for line in sys.stdin.read().splitlines():
     owned = False
     if m and not line.lstrip().startswith("#"):
         try:
-            words = shlex.split(m[1])
-            command = 0
-            while command < len(words) and re.match(r"^[A-Za-z_][A-Za-z_0-9]*=", words[command]):
-                command += 1
-            owned = command < len(words) and words[command] == home + "/acme.sh" and "--cron" in words[command+1:]
-            if any(word in (";", "&&", "||", "|", "&") for word in words):
-                owned = False
-            if "--home" in words:
-                i = words.index("--home")
-                owned = owned and i+1 < len(words) and words[i+1] == home
+            raw = m[1]
+            # Only literal, single-command legacy formats are owned. Never
+            # interpret shell substitutions or cron percent/newline syntax.
+            if any(c in raw for c in ("$", "`", "%", "\\")):
+                raise ValueError("nonliteral shell syntax")
+            lex = shlex.shlex(raw, posix=True, punctuation_chars=";&|()<>")
+            lex.whitespace_split = True
+            lex.commenters = ""
+            words = list(lex)
+            if not words or words.pop(0) != home + "/acme.sh":
+                raise ValueError("different command")
+            if not words or words.pop(0) != "--cron":
+                raise ValueError("not cron")
+            if words[:1] == ["--home"]:
+                if words[1:2] != [home]: raise ValueError("different home")
+                words = words[2:]
+            # Known acme.sh installer and old Nginx-X redirection suffixes.
+            # No arbitrary flags, assignments, redirects or trailing commands.
+            owned = words in ([], [">", "/dev/null"],
+                              [">", "/dev/null", "2", ">&", "1"],
+                              [">", "/dev/null", "2", ">", "/dev/null"])
         except ValueError:
-            pass
+            owned = False
     if owned:
         if mode == "probe":
             found = True
@@ -483,6 +499,13 @@ nx_migrate_certificate_renewal() {
   [[ -x "$HOME/.acme.sh/acme.sh" ]] || return 0
   nx_acme_check_account_identity || return 1
   local conf domain marker
+  # Existing staged deployments no longer have legacy Le_Real* destinations,
+  # but their installed dispatcher must still receive security fixes. Preserve
+  # the current cron enabled/disabled state; regeneration does not schedule it.
+  nx_acme_privileged_paths
+  if ${SUDO} test -f "$NX_ACME_MANIFEST" && ${SUDO} test -x "$NX_ACME_DISPATCH"; then
+    nx_acme_prepare_dispatch || return 1
+  fi
   for conf in "$HOME/.acme.sh"/*/*.conf; do
     [[ -f "$conf" && ! -L "$conf" ]] || continue
     domain="$(basename "$conf" .conf)"
@@ -872,6 +895,7 @@ enable_https_for_domain() {
 # rules/test/reload. A retained certificate keeps its port-80 route even when its
 # application is disabled or removed. Renderers always include their redirect;
 # this reconciler removes the now redundant helper atomically.
+# shellcheck disable=SC2031
 nx_acme_sync_routes() {
   local marker domain helper file match found tmp
   # Adopt legacy helpers only after checking their complete generated body.
@@ -892,7 +916,7 @@ nx_acme_sync_routes() {
     if [[ -e "$helper" ]]; then
       nx_acme_helper_owned "$helper" "$domain" || { error "ACME helper 内容不受管：$helper"; return 1; }
     fi
-    if [[ ! -s "$SSL_DIR/$domain/fullchain.pem" && "${NX_ACME_PENDING:-}" != "$domain" ]]; then
+    if [[ ! -s "$SSL_DIR/$domain/fullchain.pem" && "${NX_ACME_PENDING:-}" != "$domain" ]] && ! nx_acme_lease_active "$domain"; then
       ${SUDO} rm -f "$helper" "$marker" || return 1
       continue
     fi
@@ -926,6 +950,38 @@ nx_acme_sync_routes() {
     fi
   done
 }
+
+# Stable lease inodes live outside the configuration snapshot. Never unlink
+# them: another process may already have the same inode open. Locks are kernel
+# lifetime leases, with no PID reuse or wall-clock expiry ambiguity.
+nx_acme_lease_path() {
+  valid_domain "$1" || return 1
+  local directory="${NX_ACME_LEASE_DIR:-$SSL_DIR/.http01-leases}"
+  ${SUDO} python3 - "$directory" "$1" <<'PYLEASE'
+import os,stat,sys
+root,domain=sys.argv[1:]
+if not os.path.exists(root): os.mkdir(root,0o755)
+s=os.lstat(root)
+if not stat.S_ISDIR(s.st_mode) or s.st_mode&0o022: raise SystemExit('unsafe lease directory')
+path=root+'/'+domain
+fd=os.open(path,os.O_CREAT|os.O_RDONLY|os.O_NOFOLLOW|os.O_NONBLOCK,0o644)
+s=os.fstat(fd)
+if not stat.S_ISREG(s.st_mode) or s.st_nlink!=1 or s.st_mode&0o022: raise SystemExit('unsafe lease file')
+os.close(fd)
+print(path)
+PYLEASE
+}
+
+nx_acme_lease_active() (
+  local path="${NX_ACME_LEASE_DIR:-$SSL_DIR/.http01-leases}/$1" fd
+  [[ -e "$path" ]] || return 1
+  # Never wait while holding CONF: issuer takes lease then CONF. A busy lease
+  # protects the route; uncertain file types also conservatively retain it.
+  [[ -f "$path" && ! -L "$path" ]] || return 0
+  exec {fd}<"$path" || return 0
+  if flock -n -x "$fd"; then return 1; fi
+  return 0
+)
 
 nx_acme_render_helper() {
   cat <<EOFHELPER
@@ -971,12 +1027,13 @@ nx_acme_prepare_dispatch() {
   tmp="$(mktemp)" || return 1
   {
     printf '#!/bin/bash\nset -euo pipefail\nPATH=/usr/sbin:/usr/bin:/sbin:/bin\nexport PATH\n'
-    printf 'account=%q\naccount_home=%q\nssl=%q\nmanifest=%q\n' "$user" "$HOME" "$SSL_DIR" "$NX_ACME_MANIFEST"
+    printf 'account=%q\naccount_home=%q\nssl=%q\nconf=%q\nmanifest=%q\n' "$user" "$HOME" "$SSL_DIR" "$CONF_DIR" "$NX_ACME_MANIFEST"
     cat <<'DISPATCH'
 [[ $EUID == 0 ]] || exit 1
 as_account() (
-  # Hooks/daemons must not inherit the dispatcher lock descriptor.
+  # Hooks/daemons must not inherit deployment or configuration lock FDs.
   if [[ -n ${deploy_fd:-} ]]; then exec {deploy_fd}<&-; fi
+  if [[ -n ${conf_fd:-} ]]; then exec {conf_fd}<&-; fi
   su -s /bin/sh "$account" -c "$1"
 )
 quote() { printf "'%s'" "${1//\'/\'\\\'\'}"; }
@@ -1081,6 +1138,16 @@ fi
 if [[ ${1:-} == cron ]]; then
   (exec {deploy_fd}<&-; as_account "HOME=$(quote "$account_home") $(quote "$account_home/.acme.sh/acme.sh") --cron --home $(quote "$account_home/.acme.sh")") || exit $?
 fi
+# Publication must serialize with ordinary configuration transactions. Keep
+# SSL -> CONF order (the same order used by deletion/uninstall), and hold both
+# through validation, reload and rollback. Do not call nx_transaction here.
+python3 - "$conf" <<'PYCONFTRUST'
+import os,stat,sys
+p=sys.argv[1]; s=os.lstat(p)
+if not stat.S_ISDIR(s.st_mode) or s.st_uid or s.st_mode&0o022: raise SystemExit('unsafe configuration directory')
+PYCONFTRUST
+exec {conf_fd}<"$conf"
+flock -x "$conf_fd"
 python3 - "$ssl" "$manifest" "$account" "$account_home" <<'PYPUBLISH'
 import os,sys,stat,tempfile,subprocess,shutil,glob,re,signal
 ssl,manifest,account,home=sys.argv[1:]
@@ -1500,10 +1567,18 @@ nx_acme_owned_domains() {
 # share another site's key. Offline is explicit and only for a removed nginx.
 nx_acme_assert_unreferenced() {
   [[ ${NX_ACME_UNINSTALL_MODE:-online} != offline ]] || return 0
-  ${SUDO} python3 - "$NGINX_MAIN_CONF" "$CONF_DIR" "$SSL_DIR/$1" "$HOME/.acme.sh/$1" "$HOME/.acme.sh/${1}_ecc" <<'PYREF'
+  nx_acme_assert_paths_unreferenced "$SSL_DIR/$1" "$HOME/.acme.sh/$1" "$HOME/.acme.sh/${1}_ecc" "$HOME/.acme.sh/nginxx-deploy/$1"
+}
+
+# Reference protection follows the deletion set, not the deployment manifest.
+# Keep both lexical and resolved roots: deleting a symlink inside an account
+# also breaks a reference even when its target lives outside that account.
+nx_acme_assert_paths_unreferenced() {
+  [[ ${NX_ACME_UNINSTALL_MODE:-online} != offline ]] || return 0
+  ${SUDO} python3 - "$NGINX_MAIN_CONF" "$CONF_DIR" "$@" <<'PYREF'
 import glob,os,shlex,sys
 main,conf,*roots=sys.argv[1:]
-roots=[os.path.realpath(p) for p in roots]
+roots=list({q for p in roots for q in (os.path.abspath(p),os.path.realpath(p))})
 seen=set()
 def scan(path):
     path=os.path.realpath(path)
@@ -1524,11 +1599,12 @@ def scan(path):
                     matches=glob.glob(pattern)
                     if not matches and not glob.has_magic(pattern): raise ValueError('missing include: '+pattern)
                     for child in matches: scan(child)
-                elif key in ('ssl_certificate','ssl_certificate_key','ssl_trusted_certificate'):
+                elif key in ('ssl_certificate','ssl_certificate_key','ssl_trusted_certificate',
+                             'ssl_client_certificate','ssl_crl','ssl_dhparam','ssl_session_ticket_key'):
                     for value in args:
                         if '$' in value: raise ValueError('dynamic certificate reference')
-                        value=os.path.realpath(value if os.path.isabs(value) else os.path.join(os.path.dirname(main),value))
-                        if any(value==r or value.startswith(r+os.sep) for r in roots):
+                        value=os.path.abspath(value if os.path.isabs(value) else os.path.join(os.path.dirname(main),value))
+                        if any(v==r or v.startswith(r+os.sep) for v in (value,os.path.realpath(value)) for r in roots):
                             raise ValueError('active certificate reference in '+path)
             directive=[]
         else: directive.append(token)
@@ -1567,6 +1643,9 @@ nx_acme_uninstall_account() (
   nx_transaction_paths_safe || return 1
   local owned domain backup path i rc=0 original_reload
   owned="$(nx_acme_owned_domains)" || return 1
+  # The complete account home is removed even for an empty/partial manifest.
+  # Refuse before touching schedules, credentials or any certificate material.
+  nx_acme_assert_paths_unreferenced "$HOME/.acme.sh" "$EMAIL_CONF" "$DNS_CONF" || return 1
   while IFS= read -r domain; do
     [[ -n "$domain" ]] || continue
     valid_domain "$domain" && nx_acme_assert_domain_owner "$domain" && nx_acme_assert_unreferenced "$domain" || return 1

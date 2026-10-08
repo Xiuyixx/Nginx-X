@@ -12,9 +12,10 @@ source "$repo/nx.sh"
 SUDO=''
 # Exact generated dispatcher, only destination/header/reload executables replaced.
 nx_acme_privileged_paths() { NX_ACME_DISPATCH="$t/dispatch"; NX_ACME_MANIFEST="$t/manifests/acme-0.domains"; }
+nx_acme_privileged_paths
 nx_acme_prepare_dispatch() {
  nx_acme_privileged_paths
- { printf '#!/bin/bash\nset -euo pipefail\naccount=root\naccount_home=%q\nssl=%q\nmanifest=%q\n' "$HOME" "$SSL_DIR" "$NX_ACME_MANIFEST"
+ { printf '#!/bin/bash\nset -euo pipefail\naccount=root\naccount_home=%q\nssl=%q\nconf=%q\nmanifest=%q\n' "$HOME" "$SSL_DIR" "$CONF_DIR" "$NX_ACME_MANIFEST"
  sed -n '/^    cat <<.*DISPATCH.*$/,/^DISPATCH$/p' "$repo/lib/certificates.sh" | sed '1d;$d'
  } > "$t/dispatch-candidate-$BASHPID"
  chmod 700 "$t/dispatch-candidate-$BASHPID"
@@ -86,6 +87,50 @@ nx_deploy_certificate a.example > "$t/concurrent-install" 2>&1 & deploy=$!
 sleep .2; kill -0 "$deploy"; kill -0 "$cron"
 wait "$holder"; wait "$deploy"; wait "$cron"
 echo 'PASS M1 concurrent cron/install serialize on same directory inode'
+# Real configuration transaction and dispatcher serialize on the same inode.
+reload_nginx_safe() { nginx -t && nginx -s reload; }
+printf 'events {} http { map $http_upgrade $connection_upgrade { default upgrade; "" close; } include %s/*.conf; }\n' "$CONF_DIR" > "$NGINX_MAIN_CONF"
+cp "$SSL_DIR/a.example/fullchain.pem" "$t/before-conf-lock"
+cert a.example
+cp "$HOME/key" "$HOME/.acme.sh/nginxx-deploy/a.example/privkey.pem"
+cp "$HOME/chain" "$HOME/.acme.sh/nginxx-deploy/a.example/fullchain.pem"
+mkfifo "$t/conf-gate"
+hold_config() { touch "$t/conf-locked"; read -r _ < "$t/conf-gate"; }
+nx_transaction hold_config > "$t/config-holder" 2>&1 & holder=$!
+while [[ ! -e "$t/conf-locked" ]]; do kill -0 "$holder"; sleep .02; done
+"$NX_ACME_DISPATCH" cron > "$t/conf-waiting-cron" 2>&1 & cron=$!
+sleep .2; kill -0 "$cron"
+cmp "$t/before-conf-lock" "$SSL_DIR/a.example/fullchain.pem"
+echo release > "$t/conf-gate"
+wait "$holder" || { cat "$t/config-holder"; exit 1; }; wait "$cron" || { cat "$t/conf-waiting-cron"; exit 1; }
+cmp "$HOME/chain" "$SSL_DIR/a.example/fullchain.pem"
+# Reload subprocess cannot inherit either FD; the publisher parent must still
+# hold both locks during reload. A reverse-order transaction cannot enter.
+cat > "$t/bin/nginx" <<'LOCKPROBE'
+#!/bin/bash
+for directory in "$NX_PROBE_CONF" "$NX_PROBE_SSL"; do
+ for descriptor in /proc/$$/fd/*; do
+  [[ $(readlink "$descriptor") != "$directory" ]] || exit 91
+ done
+ exec {probe}<"$directory"
+ if flock -n -x "$probe"; then exit 92; fi
+ exec {probe}<&-
+done
+[[ $1 != -t ]] || { touch "$NX_PROBE_READY"; read -r _ < "$NX_PROBE_GATE"; }
+LOCKPROBE
+chmod 700 "$t/bin/nginx"
+export NX_PROBE_CONF="$CONF_DIR" NX_PROBE_SSL="$SSL_DIR" NX_PROBE_READY="$t/publisher-ready" NX_PROBE_GATE="$t/publisher-gate"
+mkfifo "$NX_PROBE_GATE"
+"$NX_ACME_DISPATCH" cron > "$t/publisher-holder" 2>&1 & deploy=$!
+while [[ ! -e "$NX_PROBE_READY" ]]; do kill -0 "$deploy"; sleep .02; done
+# Callback evidence lives outside snapshot: no reload is needed for this noop.
+nx_transaction touch "$t/entered-config" > "$t/waiting-config" 2>&1 & holder=$!
+sleep .2; kill -0 "$holder"; [[ ! -e "$t/entered-config" ]]
+echo release > "$NX_PROBE_GATE"
+wait "$deploy"; wait "$holder"
+[[ -e "$t/entered-config" ]]
+printf '#!/bin/sh\ntest ! -f "%s/fail-reload"\n' "$t" > "$t/bin/nginx"
+echo 'PASS shared CONF inode serializes both directions; reload closes SSL/CONF FDs while publisher holds locks'
 # Actual publisher reload failure must restore account stage as well as PEMs.
 cp -a "$HOME/.acme.sh/nginxx-deploy/a.example" "$t/stage-reload"
 cp -a "$SSL_DIR/a.example" "$t/deployed-reload"

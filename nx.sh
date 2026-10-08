@@ -225,6 +225,117 @@ ensure_dirs() {
   ${SUDO} mkdir -p "$SSL_DIR"
 }
 
+# Follow the configuration include graph with Nginx's main-conf prefix for
+# relative paths. Only a direct http context may define the upgrade map.
+nx_websocket_plan() {
+  python3 - "$NGINX_MAIN_CONF" "$CONF_DIR/00-websocket-map.conf" "${1:-plan}" <<'PYWS'
+import fnmatch, glob, os, sys
+main, target = (os.path.abspath(p) for p in sys.argv[1:3])
+prefix=os.path.dirname(main)
+mode=sys.argv[3]
+cache={}; active=set(); maps=[]; target_contexts=[]; openings=[]
+def parse(path):
+    if path in cache: return cache[path]
+    with open(path, encoding='utf-8', newline='') as f: text=f.read()
+    tokens=[]; i=0
+    while i<len(text):
+        if text[i].isspace(): i+=1; continue
+        if text[i]=='#':
+            j=text.find('\n',i); i=len(text) if j<0 else j+1; continue
+        if text[i] in '{};':
+            tokens.append((text[i],True,i+1)); i+=1; continue
+        value=[]; quote=None
+        while i<len(text):
+            c=text[i]
+            if c=='\\':
+                if i+1>=len(text): raise ValueError('trailing escape')
+                following=text[i+1]
+                value.append({'t':'\t','r':'\r','n':'\n'}.get(following,following) if following in ('t','r','n',chr(92),chr(34),chr(39)) else '\\'+following)
+                i+=2; continue
+            if quote:
+                if c==quote: quote=None
+                else: value.append(c)
+                i+=1; continue
+            if c in "\"'": quote=c; i+=1; continue
+            if text.startswith('${',i):
+                j=text.find('}',i+2)
+                if j<0: raise ValueError('unterminated variable')
+                value.append(text[i:j+1]); i=j+1; continue
+            if c.isspace() or c in '{};#': break
+            value.append(c); i+=1
+        if quote: raise ValueError('unterminated quote')
+        tokens.append((''.join(value),False,i))
+    cursor=0
+    def block(nested=False):
+        nonlocal cursor
+        nodes=[]
+        while cursor<len(tokens):
+            if tokens[cursor][:2]==('}',True):
+                if not nested: raise ValueError('unexpected closing brace')
+                cursor+=1; return nodes
+            args=[]
+            while cursor<len(tokens) and not tokens[cursor][1]:
+                args.append(tokens[cursor][0]); cursor+=1
+            if not args or cursor==len(tokens): raise ValueError('incomplete directive')
+            delimiter,_,offset=tokens[cursor]; cursor+=1
+            if delimiter not in (';','{'): raise ValueError('invalid delimiter')
+            children=block(True) if delimiter=='{' else None
+            nodes.append((args,children,offset))
+        if nested: raise ValueError('unclosed block')
+        return nodes
+    cache[path]=(text,block())
+    return cache[path]
+def visit(path, context=()):
+    path=os.path.realpath(path)
+    if path in active: raise ValueError('include cycle: '+path)
+    active.add(path)
+    _,nodes=parse(path)
+    walk(nodes,path,context)
+    active.remove(path)
+def walk(nodes,path,context):
+    for args,children,offset in nodes:
+        if args[0]=='include' and children is None:
+            if len(args)!=2: raise ValueError('invalid include')
+            pattern=args[1]
+            if not os.path.isabs(pattern): pattern=os.path.join(prefix,pattern)
+            pattern=os.path.normpath(pattern)
+            # A proposed file must match an actual include, including when the
+            # glob is currently empty. Count every inclusion/context to avoid
+            # injecting a map twice or into server/root context.
+            if fnmatch.fnmatchcase(target,pattern): target_contexts.append(context)
+            matches=sorted(glob.glob(pattern)) if glob.has_magic(pattern) else [pattern]
+            for child in matches: visit(child,context)
+        if children is not None:
+            if context==('http',) and args==['map','$http_upgrade','$connection_upgrade']:
+                maps.append(path)
+            # Never create a second map defining this variable from another
+            # source: refuse that collision instead of changing custom policy.
+            elif context==('http',) and args[0]=='map' and len(args)==3 and args[2]=='$connection_upgrade':
+                raise ValueError('custom map already defines $connection_upgrade')
+            if not context and args==['http']: openings.append((path,offset))
+            walk(children,path,context+(args[0],))
+try:
+    visit(main)
+    if maps:
+        if len(maps)!=1: raise ValueError('duplicate upgrade maps')
+        state='map'
+    elif target_contexts==[('http',)] and not os.path.lexists(target): state='include'
+    else:
+        candidates=[offset for path,offset in openings if path==os.path.realpath(main)]
+        if len(candidates)!=1: raise ValueError('need exactly one http block in main configuration')
+        state='inject'
+    if mode=='render':
+        if state!='inject': raise ValueError('configuration changed while preparing map')
+        text=cache[os.path.realpath(main)][0]; offset=candidates[0]
+        addition='\n    # managed_by=Nginx-X\n    map $http_upgrade $connection_upgrade {\n        default upgrade;\n        "" close;\n    }\n'
+        sys.stdout.write(text[:offset]+addition+text[offset:])
+    else: print(state)
+except (OSError,ValueError,RecursionError) as exc:
+    print('WebSocket map: '+str(exc),file=sys.stderr)
+    sys.exit(1)
+PYWS
+}
+
 # 写入 WebSocket upgrade map，避免对普通 HTTP 请求发送固定 Connection: upgrade
 ensure_websocket_map() {
   [[ -f "$NGINX_MAIN_CONF" ]] || return 0
@@ -235,29 +346,15 @@ ensure_websocket_map() {
     return 0
   fi
 
-  # Skip if nginx.conf already defines the map (e.g. Alpine default config)
-  # shellcheck disable=SC2016  # $http_upgrade is literal nginx variable syntax, matched as-is
-  if grep -qF 'map $http_upgrade' "$NGINX_MAIN_CONF" 2>/dev/null; then
-    return 0
-  fi
-
-  # Detect if CONF_DIR is included inside the http block or at root level.
-  # The "map" directive is only valid in http context.
-  # If conf.d is included at root level (before http{}), we must inject
-  # the map into nginx.conf directly or use http.d instead.
+  # The same parser plans and renders edits; dry-run happens before the
+  # transaction so an existing custom map never causes a gratuitous reload.
+  local map_state
+  map_state="$(nx_websocket_plan)" || return 1
+  [[ "$map_state" == map ]] && return 0
   local need_inject=0
-  if ! awk '
-    BEGIN { in_http = 0 }
-    /^[[:space:]]*http[[:space:]]*\{/ { in_http = 1 }
-    in_http && /include/ && /(conf\.d|http\.d)/ { found = 1; exit }
-    in_http && /^\}/ { in_http = 0 }
-    END { exit found ? 0 : 1 }
-  ' "$NGINX_MAIN_CONF" 2>/dev/null; then
-    need_inject=1
-  fi
+  [[ "$map_state" != include ]] && need_inject=1
 
   # Decide whether disk changes are needed before acquiring a transaction.
-  if [[ "$need_inject" == 0 && -f "$map_conf" ]]; then return 0; fi
   if [[ "${NX_IN_TRANSACTION:-0}" != 1 ]]; then
     nx_transaction true
     return $?
@@ -268,20 +365,10 @@ ensure_websocket_map() {
     local tmp_nginx
     tmp_nginx="$(mktemp /tmp/nginxx-map-XXXXXX)"
     trap 'rm -f "${tmp_nginx:-}"' RETURN
-    awk '
-      /^[[:space:]]*http[[:space:]]*\{/ {
-        print $0
-        print ""
-        print "    # managed_by=Nginx-X"
-        print "    map $http_upgrade $connection_upgrade {"
-        print "        default upgrade;"
-        print "        \"\"      close;"
-        print "    }"
-        print ""
-        next
-      }
-      { print }
-    ' "$NGINX_MAIN_CONF" > "$tmp_nginx"
+    if ! nx_websocket_plan render > "$tmp_nginx"; then
+      rm -f "$tmp_nginx"
+      return 1
+    fi
 
     ${SUDO} tee "$NGINX_MAIN_CONF" < "$tmp_nginx" >/dev/null || return 1
     rm -f "$tmp_nginx"

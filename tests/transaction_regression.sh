@@ -21,7 +21,7 @@ fail_reload=0
 fail_sync=0
 reload_nginx_safe() { printf '%s\n' "$(( $(cat "$T/reloads") + 1 ))" > "$T/reloads"; (( fail_reload == 0 )); }
 nx_access_sync_files() {
-  printf 'derived\n' > "$CONF_DIR/00-nx-domain-only.conf"
+  printf '# derived\n' > "$CONF_DIR/00-nx-domain-only.conf"
   (( fail_sync == 0 ))
 }
 confirm() { return 0; }
@@ -36,11 +36,11 @@ server {
 EOF
 cp "$CONF_DIR/site.conf" "$T/original"
 printf 'DOMAIN_ONLY=1\n' > "$DOMAIN_ONLY_STATE"
-printf 'original derived\n' > "$CONF_DIR/00-nx-domain-only.conf"
+printf '# original derived\n' > "$CONF_DIR/00-nx-domain-only.conf"
 assert_restored() {
   cmp "$T/original" "$CONF_DIR/site.conf"
   [[ ! -e "$CONF_DIR/site.conf.bak" ]]
-  [[ "$(cat "$CONF_DIR/00-nx-domain-only.conf")" == 'original derived' ]]
+  [[ "$(cat "$CONF_DIR/00-nx-domain-only.conf")" == '# original derived' ]]
   [[ "$(cat "$DOMAIN_ONLY_STATE")" == 'DOMAIN_ONLY=1' ]]
 }
 fail_reload=1
