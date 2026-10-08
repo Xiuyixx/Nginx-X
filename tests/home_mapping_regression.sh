@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# shellcheck disable=SC2317
+# shellcheck disable=SC2317,SC2016,SC2218,SC1091
 set -euo pipefail
 # shellcheck source=tests/fixtures/test-environment.sh
 source "$(dirname "${BASH_SOURCE[0]}")/fixtures/test-environment.sh"
@@ -46,7 +46,7 @@ enable_conf "$(basename "$site").bak"
 [[ "$(nx_home_status "$site")" == /admin.html ]]
 nx_home_menu "$site" <<< 2
 [[ -z "$(nx_home_status "$site")" ]]
-! grep -q nx-home-map "$site"
+if grep -q nx-home-map "$site"; then exit 1; fi
 cp "$site" "$root/unmapped"
 count="$(wc -l < "$root/reloads")"
 nx_home_set "$site" ''

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# shellcheck disable=SC2317
+# shellcheck disable=SC2317,SC2016
 set -euo pipefail
 # shellcheck source=tests/fixtures/test-environment.sh
 source "$(dirname "${BASH_SOURCE[0]}")/fixtures/test-environment.sh"
@@ -87,7 +87,7 @@ check_requests() {
  [[ "$(request -X POST -d payload)" == 'POST|/v1/chat|key=abc' ]]
  path='/.well-known/acme-challenge/proof'; [[ "$(request)" == acme-proof ]]
  path='/'; [[ "$(request -D "$root/headers")" == 'GET|/management.html|' ]]
- ! grep -qi '^Location:' "$root/headers"
+ if grep -qi '^Location:' "$root/headers"; then exit 1; fi
 }
 check_requests
 # HTTPS transitions preserve mapping and redirects; challenge remains independent.

@@ -292,7 +292,7 @@ for implementation in /work/nx.sh /tmp/nx-bundle; do
   nx_home_set "$site" /management.html
   nx_backend_status "$site"
   [[ "$(nx_home_status "$site")" == /management.html ]]
-  ! cmp -s /tmp/home-before.manifest /var/lib/nginxx/backend-protection/manifest.json
+  if cmp -s /tmp/home-before.manifest /var/lib/nginxx/backend-protection/manifest.json; then exit 1; fi
   local_ok
   blocked http://192.0.2.1:18317
   nft -s list ruleset >/tmp/home-after.rules
@@ -313,6 +313,8 @@ for implementation in /work/nx.sh /tmp/nx-bundle; do
   refuse disable_conf proof.conf
   refuse nx_transaction nx_move_conf "$site" "$CONF_DIR/renamed.conf"
 done
+# Sourcing the installed bundle restores production prompt functions.
+confirm() { return 0; }
 echo 'PASS: protected homepage source/bundle fingerprint updates, unchanged live nft and reload rollback'
 
 nft -s list ruleset >/tmp/enabled.rules
