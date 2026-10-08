@@ -619,3 +619,47 @@ nx_traffic_rows() {
       }
     }'
 }
+
+# No sourcing state files, dependency setup, migration or acme invocation.
+# Even a tampered DNS configuration must never execute or display its values.
+system_info_panel() {
+  python3 - "${NX_OS_RELEASE:-/etc/os-release}" "$CONF_DIR" "$SSL_DIR" "$DNS_CONF" "$HOME/.acme.sh/acme.sh" <<'PYINFO'
+import pathlib, re, shlex, sys
+osfile, conf, ssl, dns, acme = map(pathlib.Path, sys.argv[1:])
+name = '未知'
+try:
+    for line in osfile.read_text().splitlines():
+        if line.startswith('PRETTY_NAME='):
+            fields = shlex.split(line.split('=', 1)[1])
+            if len(fields) == 1: name = fields[0]
+except (OSError, ValueError): pass
+print('系统: ' + ''.join(c for c in name if c.isprintable()))
+try: enabled = sum(p.is_file() for p in conf.glob('*.conf'))
+except OSError: enabled = '未知'
+print('已启用站点配置数: ' + str(enabled))
+try: certs = sum(p.is_file() for p in ssl.glob('*/fullchain.pem'))
+except OSError: certs = '未知'
+print('已部署证书数: ' + str(certs))
+print('acme.sh: ' + ('已安装' if acme.is_file() else '未安装'))
+provider = '未配置/无法识别'
+try:
+    # save_dns_conf emits an unquoted fixed provider ID. Do not parse keys.
+    values = re.findall(r'^DNS_PROVIDER=([a-z0-9_.-]+)$', dns.read_text(), re.M)
+    known = {'cf','dp','ali','he','gd','hw','aws','google','cloudflare','dnspod','alidns','he.net','godaddy','huaweicloud','route53','gcp'}
+    if len(values) == 1 and values[0] in known: provider = values[0]
+except OSError: pass
+print('DNS API 服务商: ' + provider)
+print('DNS API 密钥: 完全隐藏（不显示长度或片段）')
+PYINFO
+  printf '内核/架构: %s / %s\n' "$(uname -r)" "$(uname -m)"
+  printf 'Nginx 版本: %s\n' "$(nginx_local_version || true)"
+  if pgrep -x nginx >/dev/null 2>&1; then echo 'Nginx 运行状态: 运行中'; else echo 'Nginx 运行状态: 未运行/无法查询'; fi
+  # This helper only reads crontabs and owned periodic scripts.
+  if nx_panel_has_acme_cron; then echo 'acme 账户级自动续期: 已配置'; else echo 'acme 账户级自动续期: 未检测到/不可读取'; fi
+}
+
+# Separate function-local scope also keeps bundle static analysis precise.
+nx_panel_has_acme_cron() {
+  local SUDO="${SUDO:+sudo -n}"
+  has_acme_cron_task
+}

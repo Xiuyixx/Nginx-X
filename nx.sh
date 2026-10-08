@@ -15,7 +15,7 @@ NC='\033[0m'
 
 # ---------- 全局变量 ----------
 APP_NAME="Nginx-X"
-APP_VERSION="3.2.1"
+APP_VERSION="3.3.0"
 # Alpine 的 nginx 把 server 配置放在 http.d，其他系统用 conf.d
 if [[ -f /etc/nginx/http.d ]] || [[ -d /etc/nginx/http.d ]]; then
   CONF_DIR="/etc/nginx/http.d"
@@ -554,56 +554,20 @@ install_nginx_official() {
 
   case "$pkg" in
     apt)
-      if ! ${SUDO} apt-get update; then
-        error "依赖索引刷新失败。请检查网络连接、APT 源状态或稍后重试。"
-        return 1
-      fi
-      if ! ${SUDO} apt-get install -y python3 curl wget socat cron gpg lsb-release ca-certificates; then
-        error "依赖安装失败。请检查网络连接、APT 源状态或稍后重试。"
-        return 1
-      fi
+      nx_install_repository_dependencies apt || return 1
 
-      note "配置 Nginx 官方 stable 源..."
-      if ! curl -fsSL https://nginx.org/keys/nginx_signing.key | ${SUDO} gpg --dearmor -o /usr/share/keyrings/nginx-archive-keyring.gpg; then
-        error "下载或导入 Nginx 官方签名密钥失败。请检查网络连接后重试。"
-        return 1
-      fi
-      # shellcheck disable=SC1091
-      echo "deb [signed-by=/usr/share/keyrings/nginx-archive-keyring.gpg] https://nginx.org/packages/$(. /etc/os-release; echo "${ID}") $(lsb_release -cs) nginx" | ${SUDO} tee /etc/apt/sources.list.d/nginx.list >/dev/null || return 1
-      if ! ${SUDO} apt-get update; then
-        error "Nginx 官方源刷新失败。请检查网络连接、软件源配置或稍后重试。"
-        return 1
-      fi
-      if ! ${SUDO} apt-get install -y nginx; then
-        error "Nginx 安装失败。请检查网络连接、软件源状态或稍后重试。"
-        return 1
-      fi
+      nx_install_repository "$pkg" "$os_id" "$(lsb_release -cs)" "" "" || return 1
       ;;
     dnf|yum)
       if [[ "$os_id" != "centos" && "$os_id" != "rhel" && "$os_id" != "rocky" && "$os_id" != "almalinux" ]]; then
         warn "当前系统 ID=$os_id，仍尝试按 RHEL 系列方式安装。"
       fi
-      ${SUDO} "$pkg" install -y epel-release || true
-      if ! ${SUDO} "$pkg" install -y python3 curl wget socat cronie; then
-        error "依赖安装失败。请检查网络连接、YUM/DNF 源状态或稍后重试。"
-        return 1
-      fi
+      nx_install_repository_dependencies "$pkg" || return 1
 
-      note "配置 Nginx 官方 stable 源..."
-      cat <<'REPO' | ${SUDO} tee /etc/yum.repos.d/nginx.repo >/dev/null || return 1
-[nginx-stable]
-name=nginx stable repo
-baseurl=https://nginx.org/packages/centos/$releasever/$basearch/
-gpgcheck=1
-enabled=1
-gpgkey=https://nginx.org/keys/nginx_signing.key
-module_hotfixes=true
-REPO
-      ${SUDO} "$pkg" makecache -y || true
-      if ! ${SUDO} "$pkg" install -y nginx; then
-        error "Nginx 安装失败。请检查网络连接、软件源状态或稍后重试。"
-        return 1
-      fi
+      local rpm_version
+      # shellcheck disable=SC1091
+      rpm_version="$(. /etc/os-release; printf '%s' "${VERSION_ID:-}")"
+      nx_install_repository "$pkg" "$os_id" "" "$rpm_version" "$(uname -m)" || return 1
       ;;
     apk)
       if ! ${SUDO} apk add python3 curl wget socat dcron openssl; then
@@ -694,9 +658,7 @@ upgrade_nginx_smart() {
 
   # 仅在检测到 nginx 官方源时，才按官网版本做对比，避免 Debian/Ubuntu 默认源误判
   local using_official_repo="0"
-  if grep -rqsF 'nginx.org' /etc/apt/sources.list /etc/apt/sources.list.d/ 2>/dev/null; then
-    using_official_repo="1"
-  elif [[ -f /etc/yum.repos.d/nginx.repo ]] || grep -rqsF 'nginx.org' /etc/yum.repos.d/ 2>/dev/null; then
+  if nx_using_official_repository; then
     using_official_repo="1"
   fi
 
@@ -2831,6 +2793,7 @@ main_menu() {
   echo "4) 实时信息"
   echo "5) 更新脚本"
   echo "6) 卸载"
+  echo "7) 系统信息（只读）"
   echo "0) 退出"
   echo "========================================"
 }
@@ -2853,8 +2816,9 @@ main() {
       4) realtime_info_menu ;;
       5) NX_IN_MENU=1 run_menu_action update_script; NX_IN_MENU=0; [[ "${NX_UPDATE_HUP:-0}" != 1 ]] || return 129; [[ -t 0 && -t 1 ]] || return 0; pause ;;
       6) uninstall_menu ;;
+      7) run_menu_action system_info_panel; pause ;;
       0) info "已退出 ${APP_NAME}。"; exit 0 ;;
-      *) warn "无效输入，请输入主菜单中的编号（0-6）。"; pause ;;
+      *) warn "无效输入，请输入主菜单中的编号（0-7）。"; pause ;;
     esac
   done
 }
@@ -2884,7 +2848,7 @@ if [[ ! -r "${NX_LIB_DIR:-${SCRIPT_DIR}/lib}/transactions.sh" ]]; then
   fi
 fi
 NX_LIB_DIR="${NX_LIB_DIR:-${SCRIPT_DIR}/lib}"
-for nx_module in dependencies templates certificates transactions access https diagnostics backend; do
+for nx_module in dependencies repositories templates certificates transactions access https diagnostics backend; do
   if [[ ! -r "${NX_LIB_DIR}/${nx_module}.sh" ]]; then
     error "缺少模块：${NX_LIB_DIR}/${nx_module}.sh，请重新运行 install.sh。"
     if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then exit 1; else return 1; fi
