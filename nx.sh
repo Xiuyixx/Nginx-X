@@ -1748,8 +1748,8 @@ config_file_action_menu() {
     echo "3) 修改"
     echo "4) 编辑"
     echo "5) 删除"
-    echo "6) 仅域名访问"
-    echo "7) 首页路径映射"
+    echo "6) 路径映射"
+    echo "7) 仅域名访问"
     echo "8) HTTPS 开关"
     echo "9) 站点健康检查"
     echo "0) 返回上一级"
@@ -1762,8 +1762,8 @@ config_file_action_menu() {
       3) run_menu_action modify_conf "$file"; pause; return 0 ;;
       4) run_menu_action edit_conf_manual "$file"; pause; return 0 ;;
       5) run_menu_action delete_conf "$file"; pause; return 0 ;;
-      6) run_menu_action nx_site_access_menu "$CONF_DIR/$file"; pause ;;
-      7) run_menu_action nx_home_menu "$CONF_DIR/$file"; pause ;;
+      6) run_menu_action nx_home_menu "$CONF_DIR/$file"; pause ;;
+      7) run_menu_action nx_site_access_menu "$CONF_DIR/$file"; pause ;;
       8) run_menu_action nx_site_https_toggle "$CONF_DIR/$file"; pause ;;
       9) run_menu_action health_check_conf_file "$CONF_DIR/$file"; pause ;;
       0) return 0 ;;

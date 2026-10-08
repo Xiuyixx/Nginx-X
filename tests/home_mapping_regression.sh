@@ -19,7 +19,9 @@ for path in /management.html /admin/index.html /a_b-1/file.txt /admin/; do nx_ho
 for path in / '' //evil.example/a /a//b /./a /../a /a/.. /%2e%2e /%252f /a?x=y /a#f 'https://evil/a' '/$host' '/a;return 200;' '/a{b}' '/a\\b' '/a"b' '/a b' $'/a\nb' '/a&b' '/a+b'; do
  if nx_home_validate_path "$path" >/dev/null 2>&1; then echo "unsafe path: $path"; exit 1; fi
 done
-nx_home_menu "$site" <<< $'1\n/management.html'
+nx_home_menu "$site" <<< $'1\n/management.html' > "$root/home-menu"
+grep -q '^路径映射：关闭$' "$root/home-menu"
+grep -q '路径映射已设置为 /management.html' "$root/home-menu"
 [[ "$(nx_home_status "$site")" == /management.html ]]
 [[ "$(grep -c 'location = /' "$site")" == 1 ]]
 [[ "$(stat -c '%u:%g:%a' "$site")" == "$attributes" ]]
@@ -98,20 +100,34 @@ run_menu_action nx_home_set "$site" /other.html > "$root/failure" 2>&1
 cmp "$site" "$root/before-failure"
 grep -q '操作未完成' "$root/failure"
 [[ "$(stat -c '%u:%g:%a' "$site")" == "$attributes" ]]
-# Menu dispatch and the installed bundle use the same function and numbering.
+# Path mapping/access swap to 6/7; HTTPS/health retain 8/9 in source/bundle.
 clear() { :; }
 pause() { :; }
 nx_home_menu() { echo home >> "$root/dispatch"; }
+nx_site_access_menu() { echo access >> "$root/dispatch"; }
 nx_site_https_toggle() { echo tls >> "$root/dispatch"; }
 health_check_conf_file() { echo health >> "$root/dispatch"; }
-config_file_action_menu "$(basename "$site")" <<< $'7\n8\n9\n0' > "$root/menu"
-[[ "$(cat "$root/dispatch")" == $'home\ntls\nhealth' ]]
-grep -q '7) 首页路径映射' "$root/menu"
+config_file_action_menu "$(basename "$site")" <<< $'6\n7\n8\n9\n0' > "$root/menu"
+[[ "$(cat "$root/dispatch")" == $'home\naccess\ntls\nhealth' ]]
+grep -q '6) 路径映射' "$root/menu"
+grep -q '7) 仅域名访问' "$root/menu"
 grep -q '8) HTTPS 开关' "$root/menu"
 grep -q '9) 站点健康检查' "$root/menu"
 bash tools/build-bundle.sh "$root/bundle"
 source "$root/bundle"
 reload_nginx_safe() { :; }
+# Exercise the bundled menu dispatcher separately from the source dispatcher.
+pause() { :; }
+nx_home_menu() { echo home >> "$root/dispatch"; }
+nx_site_access_menu() { echo access >> "$root/dispatch"; }
+nx_site_https_toggle() { echo tls >> "$root/dispatch"; }
+health_check_conf_file() { echo health >> "$root/dispatch"; }
+: > "$root/dispatch"
+config_file_action_menu "$(basename "$site")" <<< $'6\n7\n8\n9\n0' > "$root/bundle-menu"
+[[ "$(cat "$root/dispatch")" == $'home\naccess\ntls\nhealth' ]]
+for entry in '6) 路径映射' '7) 仅域名访问' '8) HTTPS 开关' '9) 站点健康检查'; do
+ grep -qF "$entry" "$root/bundle-menu"
+done
 nx_home_set "$site" /bundle.html
 [[ "$(nx_home_status "$site")" == /bundle.html ]]
 echo 'PASS: homepage validation, lifecycle rebuild/rename/enable, ownership, idempotence, conflicts, menu, bundle and rollback'

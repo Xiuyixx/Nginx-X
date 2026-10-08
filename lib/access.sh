@@ -7,11 +7,11 @@
 # in STATE_DIR. On first use preserve any deployed legacy strict policy even
 # when the first administrator has no personal legacy state.
 
-# Root path mapping is deliberately narrow: one literal, site-local path,
+# Path mapping is deliberately narrow: one literal, site-local path,
 # rendered as a managed exact location. It is not a general redirect facility.
 nx_home_validate_path() {
   [[ "$1" =~ ^/([A-Za-z0-9_-][A-Za-z0-9_.-]*/)*[A-Za-z0-9_-][A-Za-z0-9_.-]*/?$ && ${#1} -le 512 ]] || {
-    nx_access_error '首页目标须为站内绝对路径（例如 /management.html），仅允许 ASCII 字母、数字、下划线、连字符、点和单斜杠；不能是 /、点路径段、编码、查询或片段。'; return 1;
+    nx_access_error '路径映射目标须为站内绝对路径（例如 /management.html），仅允许 ASCII 字母、数字、下划线、连字符、点和单斜杠；不能是 /、点路径段、编码、查询或片段。'; return 1;
   }
 }
 
@@ -50,7 +50,7 @@ nx_home_status() { nx_conf_query home-status "$1"; }
 nx_home_menu() {
   local file="$1" c current value
   current="$(nx_home_status "$file")" || return 1
-  echo "首页路径映射：${current:-关闭}"
+  echo "路径映射：${current:-关闭}"
   echo '1) 设置/修改'
   echo '2) 关闭'
   echo '0) 返回'
@@ -58,8 +58,8 @@ nx_home_menu() {
   read -rp '请选择: ' c || return 1
   case "$c" in
     1) read -rp '输入站内绝对目标路径（例如 /management.html）: ' value || return 1
-       nx_home_set "$file" "$value" && info "首页路径映射已设置为 $value" ;;
-    2) nx_home_set "$file" '' && info '首页路径映射已关闭。' ;;
+       nx_home_set "$file" "$value" && info "路径映射已设置为 $value" ;;
+    2) nx_home_set "$file" '' && info '路径映射已关闭。' ;;
     0) return 0 ;;
     *) warn '无效输入。'; return 1 ;;
   esac
