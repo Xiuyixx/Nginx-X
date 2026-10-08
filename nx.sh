@@ -2443,7 +2443,7 @@ cert_menu() {
 realtime_info_menu() {
   while true; do
     clear
-    echo "========== 系统信息（只读） =========="
+    echo "========== 系统信息 =========="
     if ! system_info_panel; then
       warn "部分系统信息无法读取，仍可选择下方实时信息功能。"
     fi

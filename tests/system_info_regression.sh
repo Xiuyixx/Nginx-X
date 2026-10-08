@@ -73,7 +73,7 @@ assert 'UNEXPECTED_' not in text and '\n7)' not in text
 frames = text.split('CLEAR\n')[1:]
 assert len(frames) == 4, text
 for frame in frames:
-    assert frame.index('系统信息（只读）') < frame.index('系统: Test OS') < frame.index('1) 实时信息')
+    assert frame.index('系统信息') < frame.index('系统: Test OS') < frame.index('1) 实时信息')
     assert frame.index('1) 实时信息') < frame.index('2) 流量统计') < frame.index('3) 健康检查') < frame.index('0) 返回上一级')
     assert all(secret not in frame for secret in ('abcd', 'SECRET', 'LONG-KEY'))
 for action in ('ACTION_REALTIME', 'ACTION_TRAFFIC', 'ACTION_HEALTH'):
