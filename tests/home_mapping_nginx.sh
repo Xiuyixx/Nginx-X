@@ -13,11 +13,14 @@ SUDO=''
 export NX_BACKEND_STATE_DIR="$root/backend" NX_BACKEND_UNIT_DIR="$root/units" NX_BACKEND_LIBEXEC_DIR="$root/libexec"
 ipv6_available() { return 1; }
 cleanup() {
+ local rc=$?
+ if (( rc )); then cat "$root/validation.log" "$root/error.log" 2>/dev/null || true; fi
  if [[ -s "$root/nginx.pid" ]]; then
   "$nginx_bin" -p "$root/" -c "$NGINX_MAIN_CONF" -s quit >/dev/null 2>&1 || true
   nx_test_wait_pidfile "$root/nginx.pid"
  fi
  nx_test_cleanup
+ return "$rc"
 }
 trap cleanup EXIT
 mkdir -p "$SSL_DIR/example.com" "$root/web/.well-known/acme-challenge"
@@ -34,6 +37,7 @@ server {
 }
 CONF
 cat > "$NGINX_MAIN_CONF" <<CONF
+user $(id -un);
 pid $root/nginx.pid;
 error_log $root/error.log;
 events {}
@@ -55,11 +59,16 @@ build_proxy_conf example.com 18970 18971 "$site"
 chmod 640 "$site"
 attrs="$(stat -c '%u:%g:%a' "$site")"
 reload_nginx_safe() {
- "$nginx_bin" -t -p "$root/" -c "$NGINX_MAIN_CONF" >> "$root/validation.log" 2>&1 || return 1
+ # Use an isolated daemon candidate; retain port 80 in product metadata/config.
+ local candidate="$root/daemon.conf" rc=0
+ sed 's/listen 80;/listen 18973;/; s/listen \[::\]:80;/listen [::]:18973;/' "$site" > "$root/daemon-site"
+ sed "s@include $CONF_DIR/\*.conf;@include $root/daemon-site;@" "$NGINX_MAIN_CONF" > "$candidate"
+ "$nginx_bin" -t -p "$root/" -c "$candidate" >> "$root/validation.log" 2>&1 || return 1
  if [[ -s "$root/nginx.pid" ]]; then
   [[ ! -f "$root/fail-reload" ]] || { rm "$root/fail-reload"; return 1; }
-  "$nginx_bin" -p "$root/" -c "$NGINX_MAIN_CONF" -s reload >> "$root/reload.log" 2>&1 || return 1
- else "$nginx_bin" -p "$root/" -c "$NGINX_MAIN_CONF" || return 1; fi
+  "$nginx_bin" -p "$root/" -c "$candidate" -s reload >> "$root/reload.log" 2>&1 || rc=$?
+ else "$nginx_bin" -p "$root/" -c "$candidate" || rc=$?; fi
+ (( rc == 0 )) || return "$rc"
  echo applied >> "$root/applies"
 }
 request() { curl --noproxy '*' -ksS --max-time 2 --resolve "example.com:$port:127.0.0.1" "$@" "$scheme://example.com:$port$path"; }
