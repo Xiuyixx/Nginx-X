@@ -23,7 +23,7 @@ nx_transaction() (
   # In-place HTTPS/edit transformations may legitimately change a protected
   # site's bytes.  The backend guard may refresh only this exact target, never
   # a rename, disable, delete, or a second file.
-  if [[ ( ${1:-} == nx_write_conf || ${1:-} == nx_write_conf_preserved ) && -n ${3:-} && ( -z ${4:-} || ${3:-} == ${4:-} ) ]]; then
+  if [[ ( ${1:-} == nx_write_conf || ${1:-} == nx_write_conf_preserved ) && -n ${3:-} && ( -z ${4:-} || ${3:-} == "${4:-}" ) ]]; then
     NX_BACKEND_MUTABLE_PATH="$3"
   fi
   # Read by ensure_websocket_map in nx.sh through Bash dynamic scope.
