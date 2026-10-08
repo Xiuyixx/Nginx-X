@@ -22,7 +22,13 @@ for entry in "$root/nx.sh" "$T/bundle"; do
   load_dns_conf() { touch "$T/mutation"; return 99; }
   nginx_local_version() { echo 1.26.3; }
   pgrep() { return 1; }
-  crontab() { [[ "$*" == -l ]] || { touch "$T/mutation"; return 99; }; return 1; }
+  crontab() {
+    # Root probes use -l; non-root account probes add the read-only -u selector.
+    if [[ "$*" != -l && "$*" != "-u $(id -un) -l" ]]; then
+      touch "$T/mutation"; return 99
+    fi
+    return 1
+  }
   # shellcheck disable=SC2034
   NX_PERIODIC_DIR="$T/periodic"
   NX_OS_RELEASE="$T/os-release"
