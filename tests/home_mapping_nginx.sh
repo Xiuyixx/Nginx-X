@@ -39,7 +39,7 @@ CONF
 cat > "$NGINX_MAIN_CONF" <<CONF
 user $(id -un);
 pid $root/nginx.pid;
-error_log $root/error.log;
+error_log $root/error.log notice;
 events {}
 http {
  access_log off;
@@ -60,26 +60,48 @@ chmod 640 "$site"
 attrs="$(stat -c '%u:%g:%a' "$site")"
 reload_nginx_safe() {
  # Use an isolated daemon candidate; retain port 80 in product metadata/config.
- local candidate="$root/daemon.conf" rc=0
+ local candidate="$root/daemon.conf" rc=0 generation
+ generation="$(($(cat "$root/generation" 2>/dev/null || echo 0) + 1))"
+ echo "$generation" > "$root/generation"
  sed 's/listen 80;/listen 18973;/; s/listen \[::\]:80;/listen [::]:18973;/' "$site" > "$root/daemon-site"
  sed "s@include $CONF_DIR/\*.conf;@include $root/daemon-site;@" "$NGINX_MAIN_CONF" > "$candidate"
+ # A private listener identifies this exact generation without changing the
+ # business fixture. The same marker also diagnoses reload readiness.
+ sed -i "/^http {/a\\ server { listen 127.0.0.1:18974; location = /__generation { return 200 '$generation'; } }" "$candidate"
  "$nginx_bin" -t -p "$root/" -c "$candidate" >> "$root/validation.log" 2>&1 || return 1
  if [[ -s "$root/nginx.pid" ]]; then
   [[ ! -f "$root/fail-reload" ]] || { rm "$root/fail-reload"; return 1; }
   "$nginx_bin" -p "$root/" -c "$candidate" -s reload >> "$root/reload.log" 2>&1 || rc=$?
  else "$nginx_bin" -p "$root/" -c "$candidate" || rc=$?; fi
  (( rc == 0 )) || return "$rc"
+ # -s reload only delivers SIGHUP. Wait for the new configuration generation
+ # on every fresh connection, including same-response reloads and rollbacks.
+ wait_response "$generation" --http1.1 -H 'Connection: close' \
+  --resolve 'example.com:18974:127.0.0.1' 'http://example.com:18974/__generation' || return 1
  echo applied >> "$root/applies"
 }
-request() { curl --noproxy '*' -ksS --max-time 2 --resolve "example.com:$port:127.0.0.1" "$@" "$scheme://example.com:$port$path"; }
-wait_root() {
- local expected="$1"
+# Request assertions are bounded state waits, not sleeps or whole-test retries.
+# A successful marker/GET may be followed by a connection accepted by an old
+# worker (e.g. old ACME root, old method guard, or disappearing TLS listener).
+wait_response() {
+ local expected="$1" actual='' rc=0
+ shift
  for _ in {1..150}; do
-  [[ "$(request 2>/dev/null || true)" != "$expected" ]] || return 0
+  rc=0
+  actual="$(curl --noproxy '*' -ksS --connect-timeout 1 --max-time 2 "$@" 2> "$root/curl-error")" || rc=$?
+  if (( rc == 0 )) && [[ "$actual" == "$expected" ]]; then return 0; fi
   sleep .03
  done
- echo "root did not become $expected"; return 1
+ printf 'request did not converge: expected=%s actual=%s curl_rc=%s args=%s\n' "$expected" "$actual" "$rc" "$*" >&2
+ cat "$root/curl-error" >&2
+ return 1
 }
+wait_request() {
+ local expected="$1"
+ shift
+ wait_response "$expected" --http1.1 -H 'Connection: close' --resolve "example.com:$port:127.0.0.1" "$@" "$scheme://example.com:$port$path"
+}
+wait_root() { wait_request "$1"; }
 port=18970 scheme=http path='/?a=1&b=two'
 nx_home_set "$site" /management.html
 # Isolate the generated ACME webroot without touching the host path.
@@ -88,14 +110,14 @@ reload_nginx_safe
 wait_root 'GET|/management.html|a=1&b=two'
 check_requests() {
  path='/?a=1&b=two'; wait_root 'GET|/management.html|a=1&b=two'
- [[ "$(request -I -o /dev/null -w '%{http_code}')" == 200 ]]
+ wait_request 200 -I -o /dev/null -w '%{http_code}'
  for method in POST PUT DELETE OPTIONS PATCH; do
-  [[ "$(request -X "$method" -o /dev/null -w '%{http_code}')" == 405 ]]
+  wait_request 405 -X "$method" -o /dev/null -w '%{http_code}'
  done
- path='/v1/chat?item=fixture'; [[ "$(request)" == 'GET|/v1/chat|item=fixture' ]]
- [[ "$(request -X POST -d payload)" == 'POST|/v1/chat|item=fixture' ]]
- path='/.well-known/acme-challenge/proof'; [[ "$(request)" == acme-proof ]]
- path='/'; [[ "$(request -D "$root/headers")" == 'GET|/management.html|' ]]
+ path='/v1/chat?item=fixture'; wait_request 'GET|/v1/chat|item=fixture'
+ wait_request 'POST|/v1/chat|item=fixture' -X POST -d payload
+ path='/.well-known/acme-challenge/proof'; wait_request acme-proof
+ path='/'; wait_request 'GET|/management.html|' -D "$root/headers"
  if grep -qi '^Location:' "$root/headers"; then exit 1; fi
 }
 check_requests
@@ -131,5 +153,5 @@ cmp "$site" "$root/before"
 wait_root 'GET|/management.html|'
 nx_home_set "$site" ''
 wait_root 'GET|/|'
-[[ "$(request -X POST -d payload)" == 'POST|/|' ]]
+wait_request 'POST|/|' -X POST -d payload
 echo 'PASS: real HTTP/TLS homepage, query, HEAD, methods, API, ACME, HTTPS roundtrip, nginx-t/reload rollback and permissions'
