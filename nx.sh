@@ -15,7 +15,7 @@ NC='\033[0m'
 
 # ---------- 全局变量 ----------
 APP_NAME="Nginx-X"
-APP_VERSION="3.4.6"
+APP_VERSION="3.4.7"
 # Alpine 的 nginx 把 server 配置放在 http.d，其他系统用 conf.d
 if [[ -f /etc/nginx/http.d ]] || [[ -d /etc/nginx/http.d ]]; then
   CONF_DIR="/etc/nginx/http.d"
@@ -1857,22 +1857,49 @@ modify_external_conf() {
 
 }
 
+config_status_summary() {
+  local file="$1" status="未知" ports="未知" tls="未知" policy="未知" row state state_file
+  if [[ -f "$file" ]]; then
+    case "$file" in *.conf) status="启用" ;; *.conf.*) status="停用" ;; esac
+  fi
+  if row="$(nx_conf_query list "$file" 2>/dev/null)"; then
+    IFS=$'\t' read -r _ _ ports tls policy <<< "$row"
+    case "$tls" in HTTPS) tls="已开启" ;; HTTP) tls="已关闭" ;; *) tls="未知" ;; esac
+    case "$policy" in
+      inherit)
+        state_file="$DOMAIN_ONLY_STATE"
+        [[ -e "$state_file" || -L "$state_file" ]] || state_file="$STATE_DIR/domain-only.conf"
+        state="DOMAIN_ONLY=0"
+        if [[ -e "$state_file" || -L "$state_file" ]]; then state="$(cat "$state_file" 2>/dev/null)" || state=""; fi
+        case "$state" in DOMAIN_ONLY=1) policy="仅域名访问" ;; DOMAIN_ONLY=0) policy="不限域名" ;; *) policy="未知" ;; esac ;;
+      strict) policy="仅域名访问" ;;
+      open) policy="不限域名" ;;
+      *) policy="未知" ;;
+    esac
+  fi
+  echo "站点状态摘要（读取当前配置，不代表运行/网络验证）"
+  printf '状态：%s | HTTPS：%s | 端口：%s | 访问保护：%s\n' "$status" "${tls:-未知}" "${ports:-未知}" "${policy:-未知}"
+  printf '配置文件：%s\n' "$file"
+}
+
 config_file_action_menu() {
   local file="$1"
 
   while true; do
     clear
     echo "====== 配置操作：${file} ======"
-    echo "1) 启用"
-    echo "2) 停用"
-    echo "3) 修改"
-    echo "4) 编辑"
-    echo "5) 删除"
+    config_status_summary "$CONF_DIR/$file"
+    echo "1) 启用配置"
+    echo "2) 停用配置"
+    echo "3) 修改参数"
+    echo "4) 编辑配置"
+    echo "5) 删除配置"
     echo "6) 路径映射"
     echo "7) 仅域名访问"
     echo "8) HTTPS 开关"
-    echo "9) 站点健康检查"
-    echo "0) 返回上一级"
+    echo "9) 站点检查"
+    echo "0) 返回上级"
+    echo "修改参数：向导重建支持项；编辑配置：直接编辑当前文件"
     echo "============================"
     read -rp "请选择: " c || return 0
 
@@ -2332,7 +2359,7 @@ enable_https_from_config_list() {
     return 1
   fi
 
-  echo "请选择要启用证书的配置："
+  echo "请选择要开启HTTPS的配置（保留原强制跳转逻辑）："
   for i in "${!confs[@]}"; do
     domain="$(extract_domain_from_conf "${confs[$i]}")"
     echo "  $((i+1))) $(basename "${confs[$i]}")  [域名: ${domain}]"
@@ -2526,6 +2553,54 @@ domain_only_warn_exposed_ports() {
   warn "如需限制直连，请自行将后端绑定 127.0.0.1 或用防火墙限制来源，并保留 Nginx 可访问后端。"
 }
 
+certificate_preparation_status() {
+  if ! python3 - "$EMAIL_CONF" "$DNS_CONF" <<'PYPREP'
+import pathlib, re, shlex, sys
+
+def read_fields(filename, allowed):
+    path = pathlib.Path(filename)
+    try:
+        text = path.read_text()
+    except FileNotFoundError:
+        if path.is_symlink(): return None
+        return {}
+    except (OSError, UnicodeError):
+        return None
+    fields = {}
+    for line in text.splitlines():
+        if not line.strip() or line.lstrip().startswith('#'): continue
+        key, sep, raw = line.partition('=')
+        if not sep or key not in allowed or key in fields: return None
+        # Read data only. Never source/eval credentials or accept shell expansion.
+        if any(c in raw for c in '$`;'): return None
+        try: values = shlex.split(raw)
+        except ValueError: return None
+        if len(values) != 1: return None
+        fields[key] = values[0]
+    return fields
+
+email = read_fields(sys.argv[1], {'ACME_EMAIL'})
+dns = read_fields(sys.argv[2], {'DNS_PROVIDER', 'DNS_KEY1', 'DNS_KEY2'})
+e = '未知'
+if email is not None:
+    value = email.get('ACME_EMAIL', '')
+    e = '已设置' if re.fullmatch(r'[^@\s]+@[^@\s]+\.[^@\s]+', value) else ('未设置' if not value else '未知')
+d = '未知'
+if dns is not None:
+    provider = dns.get('DNS_PROVIDER', '')
+    known = {'cf','dp','ali','he','gd','hw','aws','google','cloudflare','dnspod','alidns','he.net','godaddy','huaweicloud','route53','gcp'}
+    if not any(dns.values()): d = '未配置'
+    elif provider in known:
+        ready = bool(dns.get('DNS_KEY1')) and (provider in {'cf','cloudflare'} or bool(dns.get('DNS_KEY2')))
+        d = '已配置' if ready else '未配置'
+print('准备状态：ACME邮箱 ' + e + ' | DNS API ' + d)
+PYPREP
+  then
+    echo '准备状态：ACME邮箱 未知 | DNS API 未知'
+  fi
+  echo '仅检查本地保存项；未验证账户、凭据有效性或签发能力，敏感值不显示。'
+}
+
 cert_menu() {
   require_nginx_installed || {
     pause
@@ -2535,12 +2610,13 @@ cert_menu() {
   while true; do
     clear
     echo "========== 证书管理（acme.sh） =========="
+    certificate_preparation_status
     echo "1) 设置邮箱"
     echo "2) 申请证书（HTTP-01）"
     echo "3) 配置 DNS API"
     echo "4) 申请证书（DNS-01）"
     echo "5) 证书列表"
-    echo "6) 启用证书（HTTPS 强制跳转）"
+    echo "6) 开启站点HTTPS"
     echo "0) 返回上一级"
     echo "========================================"
     read -rp "请选择: " c || return 0
@@ -2588,6 +2664,7 @@ realtime_info_menu() {
 uninstall_script_only() {
   nx_backend_uninstall_guard || return 1
   note "将执行：卸载当前已登记的 nx 安装入口。"
+  warn "同时清理当前账户邮箱设置；保留 Nginx、站点配置、证书及日志，脚本源码目录不自动删除。"
   if ! confirm "确认继续卸载本脚本？"; then
     info "已取消。"
     return "${NX_UNINSTALL_CANCEL_RC:-0}"
@@ -2676,7 +2753,8 @@ uninstall_acme_locked() {
 
 uninstall_all() {
   warn "将卸载本脚本、Nginx 软件包和 Acme；Nginx 配置/日志保留。"
-  warn "该操作会清理证书和脚本入口。"
+  warn "该操作会清理当前账户 acme.sh、邮箱/DNS 配置及归属证书和脚本入口；其他账户证书保留。"
+  warn "组合卸载分阶段执行，后续失败不恢复已卸载的软件；恢复 HTTPS 前需重新部署证书。"
   if ! confirm "确认继续全部卸载？"; then
     info "已取消。"
     return "${NX_UNINSTALL_CANCEL_RC:-0}"
@@ -2716,10 +2794,10 @@ uninstall_menu() {
   while true; do
     clear
     echo "========== 卸载 =========="
-    echo "1) 卸载脚本（彻底卸载本脚本并清理）"
-    echo "2) 卸载 Nginx（保留配置和日志）"
-    echo "3) 卸载 Acme（彻底卸载并清空 Acme 配置/邮箱信息）"
-    echo "4) 卸载脚本 + Nginx + Acme（保留 Nginx 配置/日志）"
+    echo "1) 卸载管理脚本"
+    echo "2) 卸载Nginx"
+    echo "3) 卸载当前账户ACME"
+    echo "4) 组合卸载"
     echo "0) 返回上一级"
     echo "=========================="
     read -rp "请选择: " c || return 0

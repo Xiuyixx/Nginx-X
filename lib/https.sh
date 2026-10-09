@@ -496,7 +496,11 @@ nx_https_apply() {
   fi
   rm -rf "$stage"
   if (( rc == 0 )); then
-    info "HTTPS ${operation}：$(basename "$conf_file")（保留站点配置）"
+    if [[ "$operation" == enable ]]; then
+      info "HTTPS 已开启：$(basename "$conf_file")；配置已保留"
+    else
+      info "HTTPS 已关闭：$(basename "$conf_file")；配置已保留"
+    fi
   fi
   return "$rc"
 }

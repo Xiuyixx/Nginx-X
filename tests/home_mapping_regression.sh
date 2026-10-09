@@ -112,7 +112,7 @@ config_file_action_menu "$(basename "$site")" <<< $'6\n7\n8\n9\n0' > "$root/menu
 grep -q '6) 路径映射' "$root/menu"
 grep -q '7) 仅域名访问' "$root/menu"
 grep -q '8) HTTPS 开关' "$root/menu"
-grep -q '9) 站点健康检查' "$root/menu"
+grep -q '9) 站点检查' "$root/menu"
 bash tools/build-bundle.sh "$root/bundle"
 source "$root/bundle"
 reload_nginx_safe() { :; }
@@ -125,7 +125,7 @@ health_check_conf_file() { echo health >> "$root/dispatch"; }
 : > "$root/dispatch"
 config_file_action_menu "$(basename "$site")" <<< $'6\n7\n8\n9\n0' > "$root/bundle-menu"
 [[ "$(cat "$root/dispatch")" == $'home\naccess\ntls\nhealth' ]]
-for entry in '6) 路径映射' '7) 仅域名访问' '8) HTTPS 开关' '9) 站点健康检查'; do
+for entry in '6) 路径映射' '7) 仅域名访问' '8) HTTPS 开关' '9) 站点检查'; do
  grep -qF "$entry" "$root/bundle-menu"
 done
 nx_home_set "$site" /bundle.html
