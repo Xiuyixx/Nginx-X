@@ -30,7 +30,7 @@ count="$(wc -l < "$root/reloads")"
 nx_home_set "$site" /management.html
 cmp "$site" "$root/mapped"
 [[ "$(wc -l < "$root/reloads")" == "$count" ]]
-nx_home_menu "$site" <<< 0
+rc=0; nx_home_menu "$site" <<< 0 || rc=$?; [[ $rc == 10 ]]
 cmp "$site" "$root/mapped"
 nx_home_set "$site" /admin.html
 [[ "$(nx_home_status "$site")" == /admin.html ]]

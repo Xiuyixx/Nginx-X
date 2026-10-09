@@ -187,8 +187,8 @@ cmp "$site" /tmp/cancel-before
 refuse nx_site_access_menu "$site" <<< 2
 cmp "$site" /tmp/cancel-before
 confirm() { return 0; }
-nx_site_access_menu "$site" <<< 0
-nx_site_access_menu "$site" <<< $'3\n0'
+rc=0; nx_site_access_menu "$site" <<< 0 || rc=$?; [[ $rc == 10 ]]
+rc=0; nx_site_access_menu "$site" <<< $'3\n0' || rc=$?; [[ $rc == 10 ]]
 cmp "$site" /tmp/cancel-before
 # First-ever combination: backend succeeds, final reload fails; rollback must
 # remove all newly registered enable links and preserve failed-reload backup.

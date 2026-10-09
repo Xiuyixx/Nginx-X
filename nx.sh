@@ -15,7 +15,7 @@ NC='\033[0m'
 
 # ---------- 全局变量 ----------
 APP_NAME="Nginx-X"
-APP_VERSION="3.4.2"
+APP_VERSION="3.4.3"
 # Alpine 的 nginx 把 server 配置放在 http.d，其他系统用 conf.d
 if [[ -f /etc/nginx/http.d ]] || [[ -d /etc/nginx/http.d ]]; then
   CONF_DIR="/etc/nginx/http.d"
@@ -73,6 +73,17 @@ run_menu_action() {
   if ! "$@"; then
     warn "操作未完成，请查看上方错误信息。"
   fi
+}
+
+# Only navigation screens use status 10: back/cancel/EOF, not an action error.
+# Consume it here so set -e never exits the parent menu. No persistent flags.
+run_menu_action_paused() {
+  local rc=0
+  hash -r 2>/dev/null || true
+  "$@" || rc=$?
+  [[ "$rc" != 10 ]] || return 0
+  if (( rc != 0 )); then warn "操作未完成，请查看上方错误信息。"; fi
+  pause
 }
 
 install_managed_file() {
@@ -1857,8 +1868,8 @@ config_file_action_menu() {
       3) run_menu_action modify_conf "$file"; pause; return 0 ;;
       4) run_menu_action edit_conf_manual "$file"; pause; return 0 ;;
       5) run_menu_action delete_conf "$file"; pause; return 0 ;;
-      6) run_menu_action nx_home_menu "$CONF_DIR/$file"; pause ;;
-      7) run_menu_action nx_site_access_menu "$CONF_DIR/$file"; pause ;;
+      6) run_menu_action_paused nx_home_menu "$CONF_DIR/$file" ;;
+      7) run_menu_action_paused nx_site_access_menu "$CONF_DIR/$file" ;;
       8) run_menu_action nx_site_https_toggle "$CONF_DIR/$file"; pause ;;
       9) run_menu_action health_check_conf_file "$CONF_DIR/$file"; pause ;;
       0) return 0 ;;
@@ -2313,10 +2324,10 @@ enable_https_from_config_list() {
     echo "  $((i+1))) $(basename "${confs[$i]}")  [域名: ${domain}]"
   done
   echo "  0) 返回上一级"
-  read -rp "选择序号: " idx
+  read -rp "选择序号: " idx || return 10
 
   if [[ "$idx" == "0" ]]; then
-    return 0
+    return 10
   fi
   if ! [[ "$idx" =~ ^[0-9]+$ ]] || (( idx < 1 || idx > ${#confs[@]} )); then
     error "无效序号。请输入列表中存在的配置编号。"
@@ -2338,13 +2349,14 @@ enable_https_from_config_list() {
       fi
     else
       info "已取消停用 HTTPS。"
+      return 10
     fi
     return 0
   fi
 
   if ! confirm "当前配置未启用 HTTPS，是否立即启用？"; then
     info "已取消启用 HTTPS。"
-    return 0
+    return 10
   fi
 
   if [[ ! -f "${SSL_DIR}/${domain}/fullchain.pem" || ! -f "${SSL_DIR}/${domain}/privkey.pem" ]]; then
@@ -2535,7 +2547,7 @@ cert_menu() {
       3) run_menu_action setup_dns_api; pause ;;
       4) local dns_domain; load_email; if [[ -z "${ACME_EMAIL:-}" ]]; then error "请先设置邮箱。"; pause; else read -rp "请输入域名: " dns_domain; if valid_domain "$dns_domain"; then _issue_cert_dns "$dns_domain"; fi; pause; fi ;;
       5) cert_list_menu ;;
-      6) run_menu_action enable_https_for_domain; pause ;;
+      6) run_menu_action_paused enable_https_for_domain ;;
       0) return 0 ;;
       *) warn "无效输入。请输入 0-6 之间的菜单编号。"; pause ;;
     esac

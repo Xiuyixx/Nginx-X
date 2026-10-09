@@ -772,7 +772,7 @@ cert_list_action_menu() {
     echo "3) 删除证书"
     echo "0) 返回上一级"
     echo "============================="
-    read -rp "请选择: " c
+    read -rp "请选择: " c || return 0
 
     case "$c" in
       1)
@@ -791,11 +791,11 @@ cert_list_action_menu() {
       2)
         if has_acme_cron_task; then
           if confirm "当前 ACME 账户全部证书的续期已开启，是否全部关闭？"; then
-            disable_acme_cron
+            run_menu_action disable_acme_cron
           fi
         else
           if confirm "当前 ACME 账户全部证书的续期未开启，是否全部开启？"; then
-            enable_acme_cron
+            run_menu_action enable_acme_cron
           fi
         fi
         pause
@@ -808,7 +808,7 @@ cert_list_action_menu() {
           warn "证书 ${domain} 的活动引用检查未通过，已拒绝删除。"
           warn "请先停用对应站点 HTTPS 或手动移除证书引用，再删除证书。"
           pause
-          return 1
+          return 0
         fi
 
         if ! confirm "确认删除证书 ${domain} ?"; then
@@ -817,7 +817,11 @@ cert_list_action_menu() {
           return 0
         fi
 
-        nx_delete_certificate "$domain" || return 1
+        if ! nx_delete_certificate "$domain"; then
+          warn "操作未完成，请查看上方错误信息。"
+          pause
+          return 0
+        fi
         info "证书已删除：${domain}"
         pause
         return 0
@@ -860,7 +864,7 @@ cert_list_menu() {
     done
     echo "0) 返回上一级"
     echo "============================"
-    read -rp "请输入证书编号: " idx
+    read -rp "请输入证书编号: " idx || return 0
 
     if [[ "$idx" == "0" ]]; then
       return 0

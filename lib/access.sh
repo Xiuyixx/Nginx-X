@@ -55,12 +55,12 @@ nx_home_menu() {
   echo '2) 关闭'
   echo '0) 返回'
   echo '仅对真实业务 server 的 GET/HEAD 根路径生效；其他方法访问 / 返回 405（不会转入管理页面）；ACME、其他 API 和查询参数不变。'
-  read -rp '请选择: ' c || return 1
+  read -rp '请选择: ' c || return 10
   case "$c" in
-    1) read -rp '输入站内绝对目标路径（例如 /management.html）: ' value || return 1
+    1) read -rp '输入站内绝对目标路径（例如 /management.html）: ' value || return 10
        nx_home_set "$file" "$value" && info "路径映射已设置为 $value" ;;
     2) nx_home_set "$file" '' && info '路径映射已关闭。' ;;
-    0) return 0 ;;
+    0) return 10 ;;
     *) warn '无效输入。'; return 1 ;;
   esac
 }
@@ -449,46 +449,56 @@ nx_domain_status() {
 }
 
 nx_site_access_menu() {
-  local file="$1" c status
+  local file="$1" c rc status
   [[ -f "$file" ]] || file="$CONF_DIR/$file"
   nx_access_assert_managed_site "$file" || return 1
-  status="$(nx_domain_status "$file")" || :
-  echo "站点: $(basename "$file")"
-  echo "仅域名访问：${status}"
-  echo '1) 开启'
-  echo '2) 关闭'
-  echo '3) 高级设置'
-  echo '0) 返回'
-  echo '阻止 IP 访问不等于隐藏真实 IP；合法 Host/SNI 可伪造，应用鉴权必须保留。'
-  read -rp '请选择: ' c || return 1
-  case "$c" in
-    1) nx_domain_enable "$file" ;;
-    2) nx_domain_disable "$file" ;;
-    3) nx_site_access_advanced_menu "$file" ;;
-    0) return 0 ;;
-    *) warn '无效输入。'; return 1 ;;
-  esac
+  while true; do
+    status="$(nx_domain_status "$file")" || :
+    echo "站点: $(basename "$file")"
+    echo "仅域名访问：${status}"
+    echo '1) 开启'
+    echo '2) 关闭'
+    echo '3) 高级设置'
+    echo '0) 返回'
+    echo '阻止 IP 访问不等于隐藏真实 IP；合法 Host/SNI 可伪造，应用鉴权必须保留。'
+    read -rp '请选择: ' c || return 10
+    case "$c" in
+      1) nx_domain_enable "$file" ;;
+      2) nx_domain_disable "$file" ;;
+      3) rc=0; nx_site_access_advanced_menu "$file" || rc=$?
+         if (( rc == 10 )); then continue; fi
+         return "$rc" ;;
+      0) return 10 ;;
+      *) warn '无效输入。'; return 1 ;;
+    esac
+    return $?
+  done
 }
 
 nx_site_access_advanced_menu() {
-  local file="$1" c
-  echo '高级设置（仅 Nginx 入口不保护后端直连）'
-  echo '1) 仅开启 Nginx 域名限制'
-  echo '2) 修复/启用本机后端保护（需已有严格入口）'
-  echo '3) 解除本站后端保护引用（入口策略不变）'
-  echo '4) 管理本站默认访问入口'
-  echo '0) 返回'
-  read -rp '请选择: ' c || return 1
-  case "$c" in
-    1) confirm '仅限制 Nginx，不阻止后端 IP:端口 直连。确认？' || return 1
-       nx_access_set_policy "$file" strict || return 1
-       info '仅 Nginx 入口已开启；后端直连未保护。' ;;
-    2) nx_backend_enable "$file" ;;
-    3) nx_backend_disable "$file" ;;
-    4) nx_default_site_menu "$file" ;;
-    0) return 0 ;;
-    *) warn '无效输入。'; return 1 ;;
-  esac
+  local file="$1" c rc
+  while true; do
+    echo '高级设置（仅 Nginx 入口不保护后端直连）'
+    echo '1) 仅开启 Nginx 域名限制'
+    echo '2) 修复/启用本机后端保护（需已有严格入口）'
+    echo '3) 解除本站后端保护引用（入口策略不变）'
+    echo '4) 管理本站默认访问入口'
+    echo '0) 返回'
+    read -rp '请选择: ' c || return 10
+    case "$c" in
+      1) confirm '仅限制 Nginx，不阻止后端 IP:端口 直连。确认？' || return 1
+         nx_access_set_policy "$file" strict || return 1
+         info '仅 Nginx 入口已开启；后端直连未保护。' ;;
+      2) nx_backend_enable "$file" ;;
+      3) nx_backend_disable "$file" ;;
+      4) rc=0; nx_default_site_menu "$file" || rc=$?
+         if (( rc == 10 )); then continue; fi
+         return "$rc" ;;
+      0) return 10 ;;
+      *) warn '无效输入。'; return 1 ;;
+    esac
+    return $?
+  done
 }
 
 nx_default_site_menu() {
@@ -504,9 +514,9 @@ nx_default_site_menu() {
   echo '0) 返回'
   echo '选择监听地址后，本站接收该地址的 IP / 未匹配域名请求；开启仅域名访问时仍会拒绝这些请求。'
   echo '同一监听地址只能有一个默认站点；更换时请先在原站点清除设置。'
-  read -rp '选择监听地址: ' choice || return 1
+  read -rp '选择监听地址: ' choice || return 10
   case "$choice" in
-    0) return 0 ;;
+    0) return 10 ;;
     c|C) nx_access_set_default "$file" ''; return ;;
   esac
   [[ "$choice" =~ ^[1-9][0-9]*$ ]] && ((choice<=${#sockets[@]})) || return 1

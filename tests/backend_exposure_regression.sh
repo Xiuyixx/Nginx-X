@@ -77,7 +77,7 @@ LISTEN 0 128 $endpoint 0.0.0.0:*"
   grep -q '后端监听风险 8317' "$T/out"
   if grep -q 'privatepassword\|privatetoken' "$T/out"; then exit 1; fi
   CONF_DIR="$T"
-  nx_site_access_menu "$T/internal.conf" <<< 0 > "$T/out"
+  rc=0; nx_site_access_menu "$T/internal.conf" <<< 0 > "$T/out" || rc=$?; [[ $rc == 10 ]]
   grep -q '阻止 IP 访问不等于隐藏真实 IP' "$T/out"
   grep -q '应用鉴权必须保留' "$T/out"
   nx_access_set_policy() { [[ "$2" == strict ]]; }

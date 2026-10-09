@@ -405,7 +405,7 @@ site_health_menu() {
     echo "2) 检查单个站点"
     echo "0) 返回上一级"
     echo "================================="
-    read -rp "请选择: " c
+    read -rp "请选择: " c || return 0
 
     case "$c" in
       1)
@@ -445,7 +445,7 @@ site_health_menu() {
           echo "  $((i+1))) $(basename "${confs[$i]}")  [域名: $(extract_domain_from_conf "${confs[$i]}")]"
         done
         echo "  0) 返回上一级"
-        read -rp "选择序号: " idx
+        read -rp "选择序号: " idx || return 0
         if [[ "$idx" == "0" ]]; then
           continue
         fi
@@ -610,6 +610,9 @@ EOF
     # 每5秒刷新；检测到任意键输入则退出
     if read -r -s -n 1 -t 5 _key; then
       break
+    else
+      # read >128 is the refresh timeout; EOF must leave the screen.
+      [[ $? -gt 128 ]] || return 0
     fi
   done
 }
@@ -675,6 +678,9 @@ EOF
 
     if read -r -s -n 1 -t 5 _key; then
       break
+    else
+      # read >128 is the refresh timeout; EOF must leave the screen.
+      [[ $? -gt 128 ]] || return 0
     fi
   done
 }
