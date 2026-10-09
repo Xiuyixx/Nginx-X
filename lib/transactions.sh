@@ -298,6 +298,48 @@ nx_site_https_toggle() {
   fi
 }
 
+# Explicit menu actions keep the legacy transformation and certificate flow,
+# while making the requested end state unambiguous and idempotent.
+nx_site_https_enable() {
+  local file="$1" domain
+  [[ "$file" == *.conf ]] || { error "请先启用站点。"; return 1; }
+  if conf_https_enabled "$file"; then
+    info "HTTPS 已开启，无需重复操作。"
+    return 0
+  fi
+  domain="$(extract_domain_from_conf "$file")" || return 1
+  ensure_cert_for_domain_interactive "$domain" || return $?
+  enable_https_for_conf_file "$domain" "$file"
+}
+
+nx_site_https_disable() {
+  local file="$1" domain
+  [[ "$file" == *.conf ]] || { error "请先启用站点。"; return 1; }
+  if ! conf_https_enabled "$file"; then
+    info "HTTPS 已关闭，无需重复操作。"
+    return 0
+  fi
+  domain="$(extract_domain_from_conf "$file")" || return 1
+  disable_https_for_conf_file "$domain" "$file"
+}
+
+nx_site_https_menu() {
+  local file="$1" choice status
+  [[ "$file" == *.conf ]] || { error "请先启用站点。"; return 1; }
+  if conf_https_enabled "$file"; then status="已开启"; else status="已关闭"; fi
+  echo "HTTPS 状态：${status}"
+  echo '1) 开启 HTTPS'
+  echo '2) 关闭 HTTPS'
+  echo '0) 返回'
+  read -rp '请选择: ' choice || return 10
+  case "$choice" in
+    1) nx_site_https_enable "$file" ;;
+    2) nx_site_https_disable "$file" ;;
+    0) return 10 ;;
+    *) warn '无效输入。请输入 0-2 之间的菜单编号。'; return 1 ;;
+  esac
+}
+
 nx_remove_conf() {
   nx_conf_path_allowed "$1" || return 1
   nx_acme_retain_conf_route "$1" || return 1

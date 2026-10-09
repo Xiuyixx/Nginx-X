@@ -15,7 +15,7 @@ NC='\033[0m'
 
 # ---------- 全局变量 ----------
 APP_NAME="Nginx-X"
-APP_VERSION="3.4.4"
+APP_VERSION="3.4.5"
 # Alpine 的 nginx 把 server 配置放在 http.d，其他系统用 conf.d
 if [[ -f /etc/nginx/http.d ]] || [[ -d /etc/nginx/http.d ]]; then
   CONF_DIR="/etc/nginx/http.d"
@@ -1280,7 +1280,10 @@ ensure_cert_for_domain_interactive() {
   fi
 
   warn "检测到域名 ${domain} 尚无证书。"
-  if ! ensure_email_interactive; then
+  local email_rc=0
+  ensure_email_interactive || email_rc=$?
+  [[ "$email_rc" != 10 ]] || return 10
+  if (( email_rc != 0 )); then
     error "邮箱未设置，无法自动申请证书。"
     return 1
   fi
@@ -1881,7 +1884,7 @@ config_file_action_menu() {
       5) run_menu_action delete_conf "$file"; pause; return 0 ;;
       6) run_menu_action_paused nx_home_menu "$CONF_DIR/$file" ;;
       7) run_menu_action_paused nx_site_access_menu "$CONF_DIR/$file" ;;
-      8) run_menu_action nx_site_https_toggle "$CONF_DIR/$file"; pause ;;
+      8) run_menu_action_paused nx_site_https_menu "$CONF_DIR/$file" ;;
       9) run_menu_action health_check_conf_file "$CONF_DIR/$file"; pause ;;
       0) return 0 ;;
       *) warn "无效输入。请输入 0-9 之间的菜单编号。"; pause ;;

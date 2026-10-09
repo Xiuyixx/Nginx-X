@@ -105,7 +105,7 @@ clear() { :; }
 pause() { :; }
 nx_home_menu() { echo home >> "$root/dispatch"; }
 nx_site_access_menu() { echo access >> "$root/dispatch"; }
-nx_site_https_toggle() { echo tls >> "$root/dispatch"; }
+nx_site_https_menu() { echo tls >> "$root/dispatch"; }
 health_check_conf_file() { echo health >> "$root/dispatch"; }
 config_file_action_menu "$(basename "$site")" <<< $'6\n7\n8\n9\n0' > "$root/menu"
 [[ "$(cat "$root/dispatch")" == $'home\naccess\ntls\nhealth' ]]
@@ -120,7 +120,7 @@ reload_nginx_safe() { :; }
 pause() { :; }
 nx_home_menu() { echo home >> "$root/dispatch"; }
 nx_site_access_menu() { echo access >> "$root/dispatch"; }
-nx_site_https_toggle() { echo tls >> "$root/dispatch"; }
+nx_site_https_menu() { echo tls >> "$root/dispatch"; }
 health_check_conf_file() { echo health >> "$root/dispatch"; }
 : > "$root/dispatch"
 config_file_action_menu "$(basename "$site")" <<< $'6\n7\n8\n9\n0' > "$root/bundle-menu"
