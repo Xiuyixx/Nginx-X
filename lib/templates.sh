@@ -677,7 +677,14 @@ def inspect(filename, query=operation):
                 names = [unquote(x) for n in directives(srv, 'server_name') for x in n['args'][1:]]
                 for n in directives(srv, 'listen'):
                     args = [unquote(x) for x in n['args'][1:]]
-                    rows.append((idx, socket(args[0], inspect=True), 'ssl' in args[1:], names))
+                    try:
+                        sock = socket(args[0], inspect=True)
+                    except (ValueError, IndexError):
+                        # The list is informational: Unix/complex listeners must
+                        # not make the whole site disappear or be guessed as :80.
+                        if query == 'list': continue
+                        raise
+                    rows.append((idx, sock, 'ssl' in args[1:], names))
         if query == 'tls-check':
             inherited = []
             if params and os.path.isfile(params[0]):
@@ -692,12 +699,19 @@ def inspect(filename, query=operation):
                     if not any(n['args'][0] == key and len(n['args']) == 2 for n in scope): fail('TLS server missing ' + key)
         elif query == 'list':
             row = next((r for r in rows if r[2]), rows[0] if rows else None)
-            names = row[3] if row else []
+            names = row[3] if row else [unquote(x) for srv in servers for n in directives(srv, 'server_name') for x in n['args'][1:]]
             values = metadata.get('access_policy', [])
             policy = values[0][2] if len(values)==1 else ('invalid' if values else 'inherit')
-            fields = [filename, names[0] if names else '未知域名',
-                      ','.join(sorted({r[1] for r in rows})) or '未知监听',
-                      'HTTPS' if any(r[2] for r in rows) else 'HTTP', policy]
+            fallback = os.path.basename(filename)
+            fallback = re.sub(r'\.conf(?:\..*)?$', '', fallback)
+            domain = names[0] if names and names[0] else (fallback or '未知域名')
+            ports = sorted({int(r[1].rsplit(':', 1)[1]) for r in rows})
+            listeners = [n for srv in servers for n in directives(srv, 'listen')]
+            port_text = '/'.join(map(str, ports))
+            if len(rows) != len(listeners) or not listeners:
+                port_text += ('/' if port_text else '') + '未知'
+            tls = 'HTTPS' if any('ssl' in [unquote(x) for x in n['args'][2:]] for n in listeners) else 'HTTP'
+            fields = [filename, domain, port_text, tls, policy or 'invalid']
             if any(any(c in field for c in '\t\r\n') for field in fields): fail('unsupported list field')
             print('\t'.join(fields))
         elif query == 'meta':
@@ -760,6 +774,11 @@ def inspect(filename, query=operation):
         else: fail('unknown query')
     except (ValueError, OSError, UnicodeError, IndexError) as exc:
         print('Config inspection refused: '+str(exc), file=sys.stderr)
+        if query == 'list' and not any(c in filename for c in '\t\r\n'):
+            # Keep one row per file, including failed inspections, so selection
+            # indexes never shift to a different configuration.
+            print('\t'.join([filename, os.path.basename(filename), '未知', '未知协议', 'invalid']))
+            return
         sys.exit(1)
 
 for batch_index, filename in enumerate(([filename] + params[1:] if operation == 'policy-batch' else [filename] + params if operation in ('list', 'traffic') else [filename])):

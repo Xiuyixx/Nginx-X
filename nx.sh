@@ -1610,22 +1610,30 @@ print_conf_list() {
   fi
 
   echo "可管理配置列表："
-  local f domain ports tls policy status effective records
-  effective="关闭"; domain_only_state_is_enabled && effective="开启"
+  local f domain ports tls policy status effective records state_file state
+  effective="不限域名"; domain_only_state_is_enabled && effective="仅域名访问"
+  # Invalid/unreadable shared (or legacy) state is not evidence of open access.
+  state_file="$DOMAIN_ONLY_STATE"
+  [[ -e "$state_file" || -L "$state_file" ]] || state_file="$STATE_DIR/domain-only.conf"
+  if [[ -e "$state_file" || -L "$state_file" ]]; then
+    state="$(cat "$state_file" 2>/dev/null)" || state=""
+    case "$state" in DOMAIN_ONLY=0|DOMAIN_ONLY=1) ;; *) effective="域名限制未知" ;; esac
+  fi
   local -a paths=()
   for f in "${FILES[@]}"; do paths+=("$CONF_DIR/$f"); done
   records="$(nx_conf_query list "${paths[@]}")" || return 1
   while IFS=$'\t' read -r f domain ports tls policy; do
     f="${f##*/}"
     case "$policy" in
-      ''|inherit)
-        policy="Nginx 域名限制：${effective}（沿用原设置）" ;;
-      strict) policy="Nginx 域名限制：开启" ;;
-      open) policy="Nginx 域名限制：关闭" ;;
-      *) policy="无效策略" ;;
+      inherit) policy="$effective" ;;
+      strict) policy="仅域名访问" ;;
+      open) policy="不限域名" ;;
+      *) policy="域名限制未知（无效策略）" ;;
     esac
-    status="已停用"; [[ "$f" == *.conf ]] && status="已启用"
-    echo "  ${i}) ${domain:-未知域名} | ${ports} | ${tls} | ${policy} | ${status} | ${f}"
+    status="停用"; [[ "$f" == *.conf ]] && status="启用"
+    (( i == 1 )) || echo
+    printf '  %s) [%s] %s\n     %s | 端口 %s | %s\n' \
+      "$i" "$status" "${domain:-$f}" "${tls:-未知协议}" "${ports:-未知}" "$policy"
     ((i+=1))
   done <<< "$records"
   return 0
