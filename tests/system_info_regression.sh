@@ -45,7 +45,7 @@ for entry in "$root/nx.sh" "$T/bundle"; do
   if grep -qE 'abcd|SECRET|LONG-KEY' "$T/panel"; then exit 1; fi
   [[ ! -e "$T/pwned" && ! -e "$T/mutation" && "$before" == "$(sha256sum "$DNS_CONF")" ]]
   main_menu > "$T/menu"
-  grep -q '^4) 实时信息' "$T/menu"
+  grep -q '^4) 运行状态' "$T/menu"
   grep -q '^5) 更新脚本' "$T/menu"; grep -q '^6) 卸载' "$T/menu"
   grep -q '^7)' "$T/menu" && exit 1
 
@@ -73,8 +73,8 @@ assert 'UNEXPECTED_' not in text and '\n7)' not in text
 frames = text.split('CLEAR\n')[1:]
 assert len(frames) == 4, text
 for frame in frames:
-    assert frame.index('系统信息') < frame.index('系统: Test OS') < frame.index('1) 实时信息')
-    assert frame.index('1) 实时信息') < frame.index('2) 流量统计') < frame.index('3) 健康检查') < frame.index('0) 返回上一级')
+    assert frame.index('系统信息') < frame.index('系统: Test OS') < frame.index('1) 实时监控')
+    assert frame.index('1) 实时监控') < frame.index('2) 流量统计') < frame.index('3) 站点检查') < frame.index('0) 返回上级')
     assert all(secret not in frame for secret in ('abcd', 'SECRET', 'LONG-KEY'))
 for action in ('ACTION_REALTIME', 'ACTION_TRAFFIC', 'ACTION_HEALTH'):
     assert text.count(action) == 1, text

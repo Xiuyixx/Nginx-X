@@ -92,7 +92,7 @@ setup_dns_api() {
   echo "6)  华为云          (HUAWEICLOUD_Username + HUAWEICLOUD_Password)"
   echo "7)  AWS Route53     (AWS_ACCESS_KEY_ID + AWS_SECRET_ACCESS_KEY)"
   echo "8)  Google Cloud    (GCE_Project + GCE_ServiceAccountEmail)"
-  read -rp "请选择 [1-8]: " choice || return 10
+  read -rp "请选择（1-8）: " choice || return 10
 
   case "$choice" in
     1) provider="cf"; read -rp "Cloudflare API Token: " key1 || return 10 ;;
@@ -576,9 +576,9 @@ nx_acme_renewal_menu() {
   echo "当前 ACME 账户全部证书的自动续期：${status}"
   echo '1) 开启账户级自动续期'
   echo '2) 关闭账户级自动续期'
-  echo '0) 返回'
+  echo '0) 返回上级'
   echo '说明：此设置影响当前 ACME 账户下的全部证书，不只当前选中的证书。'
-  read -rp '请选择: ' c || return 10
+  read -rp '请选择（0-2）: ' c || return 10
   case "$c" in
     1) confirm '确认开启当前 ACME 账户全部证书的自动续期？' || return 10
        enable_acme_cron ;;
@@ -828,9 +828,9 @@ cert_list_action_menu() {
     echo "1) 重新申请"
     echo "2) 管理当前 ACME 账户全部证书的续期"
     echo "3) 删除证书"
-    echo "0) 返回上一级"
+    echo "0) 返回上级"
     echo "============================="
-    read -rp "请选择: " c || return 0
+    read -rp "请选择（0-3）: " c || return 0
 
     case "$c" in
       1)
@@ -903,9 +903,9 @@ cert_list_menu() {
     for i in "${!certs[@]}"; do
       echo "$((i+1))) ${certs[$i]}  [账户级续期: ${renew_status}]"
     done
-    echo "0) 返回上一级"
+    echo "0) 返回上级"
     echo "============================"
-    read -rp "请输入证书编号: " idx || return 0
+    read -rp "请选择（0-${#certs[@]}）: " idx || return 0
 
     if [[ "$idx" == "0" ]]; then
       return 0

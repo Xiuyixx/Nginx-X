@@ -48,16 +48,16 @@ server { listen 8084; server_name duplicate-policy.test; }'
     print_conf_list > "$T/list" 2> "$T/errors"
     case "$inherited" in 0) effective=不限域名 ;; 1) effective=仅域名访问 ;; *) effective=域名限制未知 ;; esac
     grep -Fxq "     HTTP | 端口 90/10000 | $effective" "$T/list"
-    grep -Fxq '  3) [启用] d' "$T/list"
+    grep -Fxq '  3) [启用] 未知域名' "$T/list"
     grep -Fxq '  4) [启用] unix.test' "$T/list"
     grep -Fxq "     HTTP | 端口 未知 | $effective" "$T/list"
     grep -Fxq "     HTTPS | 端口 81/未知 | $effective" "$T/list"
     grep -Fxq '  8) [启用] empty.test' "$T/list"
     grep -Fxq '     HTTP | 端口 8082 | 域名限制未知（无效策略）' "$T/list"
-    grep -Fxq '  7) [启用] h.conf' "$T/list"
+    grep -Fxq '  7) [启用] 未知域名' "$T/list"
     grep -Fxq '     未知协议 | 端口 未知 | 域名限制未知（无效策略）' "$T/list"
-    grep -Fxq '  10) [启用] k' "$T/list"
-    grep -Fxq '  11) [启用] l.conf' "$T/list"
+    grep -Fxq '  10) [启用] 未知域名' "$T/list"
+    grep -Fxq '  11) [启用] 未知域名' "$T/list"
     [[ ${#FILES[@]} == 12 && ${FILES[1]} == c.conf && ${FILES[11]} == b.conf.bak ]]
   done
   # Missing state retains the existing effective-policy fallback; bad legacy

@@ -45,7 +45,7 @@ case "$scenario" in
   dns_setup_menu <<< 0 > "$root/result" ;;
  numeric-overflow)
   config_manage_menu <<< $'18446744073709551617\n\n0' > "$root/result"
-  ! grep -q '配置操作：' "$root/result" ;;
+  ! grep -q '========== 配置操作 ==========' "$root/result" ;;
  cert-cancel)
   has_acme_cron_task() { return 1; }
   nx_acme_assert_unreferenced() { :; }

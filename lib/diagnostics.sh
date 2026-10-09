@@ -400,12 +400,12 @@ site_health_menu() {
 
   while true; do
     clear
-    echo "========== 健康检查 =========="
+    echo "========== 站点检查 =========="
     echo "1) 检查所有站点"
     echo "2) 检查单个站点"
-    echo "0) 返回上一级"
+    echo "0) 返回上级"
     echo "================================="
-    read -rp "请选择: " c || return 0
+    read -rp "请选择（0-2）: " c || return 0
 
     case "$c" in
       1)
@@ -444,8 +444,8 @@ site_health_menu() {
         for i in "${!confs[@]}"; do
           echo "  $((i+1))) $(basename "${confs[$i]}")  [域名: $(extract_domain_from_conf "${confs[$i]}")]"
         done
-        echo "  0) 返回上一级"
-        read -rp "选择序号: " idx || return 0
+        echo "  0) 返回上级"
+        read -rp "请选择（0-${#confs[@]}）: " idx || return 0
         if [[ "$idx" == "0" ]]; then
           continue
         fi

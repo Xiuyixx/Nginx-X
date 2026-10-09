@@ -790,9 +790,7 @@ def inspect(filename, query=operation):
             names = row[3] if row else [unquote(x) for srv in servers for n in directives(srv, 'server_name') for x in n['args'][1:]]
             values = metadata.get('access_policy', [])
             policy = values[0][2] if len(values)==1 else ('invalid' if values else 'inherit')
-            fallback = os.path.basename(filename)
-            fallback = re.sub(r'\.conf(?:\..*)?$', '', fallback)
-            domain = names[0] if names and names[0] else (fallback or '未知域名')
+            domain = names[0] if names and names[0] else '未知域名'
             ports = sorted({int(r[1].rsplit(':', 1)[1]) for r in rows})
             listeners = [n for srv in servers for n in directives(srv, 'listen')]
             port_text = '/'.join(map(str, ports))
@@ -865,7 +863,7 @@ def inspect(filename, query=operation):
         if query == 'list' and not any(c in filename for c in '\t\r\n'):
             # Keep one row per file, including failed inspections, so selection
             # indexes never shift to a different configuration.
-            print('\t'.join([filename, os.path.basename(filename), '未知', '未知协议', 'invalid']))
+            print('\t'.join([filename, '未知域名', '未知', '未知协议', 'invalid']))
             return
         sys.exit(1)
 

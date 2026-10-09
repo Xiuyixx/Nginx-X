@@ -53,9 +53,9 @@ nx_home_menu() {
   echo "路径映射：${current:-关闭}"
   echo '1) 设置/修改'
   echo '2) 关闭'
-  echo '0) 返回'
+  echo '0) 返回上级'
   echo '仅对真实业务 server 的 GET/HEAD 根路径生效；其他方法访问 / 返回 405（不会转入管理页面）；ACME、其他 API 和查询参数不变。'
-  read -rp '请选择: ' c || return 10
+  read -rp '请选择（0-2）: ' c || return 10
   case "$c" in
     1) read -rp '输入站内绝对目标路径（例如 /management.html）: ' value || return 10
        nx_home_set "$file" "$value" && info "路径映射已设置为 $value" ;;
@@ -459,9 +459,9 @@ nx_site_access_menu() {
     echo '1) 开启'
     echo '2) 关闭'
     echo '3) 高级设置'
-    echo '0) 返回'
+    echo '0) 返回上级'
     echo '阻止 IP 访问不等于隐藏真实 IP；合法 Host/SNI 可伪造，应用鉴权必须保留。'
-    read -rp '请选择: ' c || return 10
+    read -rp '请选择（0-3）: ' c || return 10
     case "$c" in
       1) nx_domain_enable "$file" ;;
       2) nx_domain_disable "$file" ;;
@@ -483,8 +483,8 @@ nx_site_access_advanced_menu() {
     echo '2) 修复/启用本机后端保护（需已有严格入口）'
     echo '3) 解除本站后端保护引用（入口策略不变）'
     echo '4) 管理本站默认访问入口'
-    echo '0) 返回'
-    read -rp '请选择: ' c || return 10
+    echo '0) 返回上级'
+    read -rp '请选择（0-4）: ' c || return 10
     case "$c" in
       1) confirm '仅限制 Nginx，不阻止后端 IP:端口 直连。确认？' || return 10
          nx_access_set_policy "$file" strict || return 1
@@ -511,10 +511,10 @@ nx_default_site_menu() {
   echo "本站默认入口：${defaults:-未设置}"
   for i in "${!sockets[@]}"; do echo "$((i+1))) ${sockets[$i]}"; done
   echo 'c) 清除本站默认入口设置'
-  echo '0) 返回'
+  echo '0) 返回上级'
   echo '选择监听地址后，本站接收该地址的 IP / 未匹配域名请求；开启仅域名访问时仍会拒绝这些请求。'
   echo '同一监听地址只能有一个默认站点；更换时请先在原站点清除设置。'
-  read -rp '选择监听地址: ' choice || return 10
+  read -rp "请选择（0-${#sockets[@]}，c 清除）: " choice || return 10
   case "$choice" in
     0) return 10 ;;
     c|C) nx_access_set_default "$file" ''; return ;;

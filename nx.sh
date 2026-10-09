@@ -15,7 +15,7 @@ NC='\033[0m'
 
 # ---------- 全局变量 ----------
 APP_NAME="Nginx-X"
-APP_VERSION="3.4.7"
+APP_VERSION="3.4.8"
 # Alpine 的 nginx 把 server 配置放在 http.d，其他系统用 conf.d
 if [[ -f /etc/nginx/http.d ]] || [[ -d /etc/nginx/http.d ]]; then
   CONF_DIR="/etc/nginx/http.d"
@@ -1858,12 +1858,12 @@ modify_external_conf() {
 }
 
 config_status_summary() {
-  local file="$1" status="未知" ports="未知" tls="未知" policy="未知" row state state_file
+  local file="$1" status="未知" domain="未知" ports="未知" tls="未知" policy="未知" row state state_file
   if [[ -f "$file" ]]; then
     case "$file" in *.conf) status="启用" ;; *.conf.*) status="停用" ;; esac
   fi
   if row="$(nx_conf_query list "$file" 2>/dev/null)"; then
-    IFS=$'\t' read -r _ _ ports tls policy <<< "$row"
+    IFS=$'\t' read -r _ domain ports tls policy <<< "$row"
     case "$tls" in HTTPS) tls="已开启" ;; HTTP) tls="已关闭" ;; *) tls="未知" ;; esac
     case "$policy" in
       inherit)
@@ -1878,7 +1878,7 @@ config_status_summary() {
     esac
   fi
   echo "站点状态摘要（读取当前配置，不代表运行/网络验证）"
-  printf '状态：%s | HTTPS：%s | 端口：%s | 访问保护：%s\n' "$status" "${tls:-未知}" "${ports:-未知}" "${policy:-未知}"
+  printf '域名：%s\n状态：%s\nHTTPS：%s\n端口：%s\n域名限制：%s\n' "${domain:-未知}" "$status" "${tls:-未知}" "${ports:-未知}" "${policy:-未知}"
   printf '配置文件：%s\n' "$file"
 }
 
@@ -1887,7 +1887,7 @@ config_file_action_menu() {
 
   while true; do
     clear
-    echo "====== 配置操作：${file} ======"
+    echo "========== 配置操作 =========="
     config_status_summary "$CONF_DIR/$file"
     echo "1) 启用配置"
     echo "2) 停用配置"
@@ -1899,15 +1899,14 @@ config_file_action_menu() {
     echo "8) HTTPS 开关"
     echo "9) 站点检查"
     echo "0) 返回上级"
-    echo "修改参数：向导重建支持项；编辑配置：直接编辑当前文件"
     echo "============================"
-    read -rp "请选择: " c || return 0
+    read -rp "请选择（0-9）: " c || return 0
 
     case "$c" in
       1) run_menu_action enable_conf "$file"; pause; return 0 ;;
       2) run_menu_action disable_conf "$file"; pause; return 0 ;;
-      3) run_menu_action_paused modify_conf "$file"; return 0 ;;
-      4) run_menu_action edit_conf_manual "$file"; pause; return 0 ;;
+      3) echo "修改参数：向导重建支持的站点参数。"; run_menu_action_paused modify_conf "$file"; return 0 ;;
+      4) echo "编辑配置：直接编辑当前配置文件。"; run_menu_action edit_conf_manual "$file"; pause; return 0 ;;
       5) run_menu_action delete_conf "$file"; pause; return 0 ;;
       6) run_menu_action_paused nx_home_menu "$CONF_DIR/$file" ;;
       7) run_menu_action_paused nx_site_access_menu "$CONF_DIR/$file" ;;
@@ -1933,9 +1932,9 @@ config_manage_menu() {
       return 0
     fi
     echo
-    echo "0) 返回上一级"
+    echo "0) 返回上级"
     echo "==============================="
-    read -rp "请选择配置序号: " c || return 0
+    read -rp "请选择（0-${#FILES[@]}）: " c || return 0
 
     if [[ "$c" == "0" ]]; then
       return 0
@@ -2237,9 +2236,9 @@ dns_setup_menu() {
     echo "3) 阿里 DNS    (223.5.5.5 + 223.6.6.6)"
     echo "4) 腾讯 DNS    (119.29.29.29)"
     echo "5) 自定义输入"
-    echo "0) 返回上一级"
+    echo "0) 返回上级"
     echo "================================"
-    read -rp "请选择: " c || return 0
+    read -rp "请选择（0-5）: " c || return 0
 
     local ns1="" ns2=""
 
@@ -2317,9 +2316,9 @@ config_entry_menu() {
     echo "3) 配置列表"
     echo "4) 导入已有配置"
     echo "5) 系统DNS设置"
-    echo "0) 返回上一级"
+    echo "0) 返回上级"
     echo "=============================="
-    read -rp "请选择: " c || return 0
+    read -rp "请选择（0-5）: " c || return 0
 
     case "$c" in
       1) run_menu_action_paused add_reverse_proxy ;;
@@ -2351,7 +2350,7 @@ conf_https_enabled() {
 
 enable_https_from_config_list() {
   local -a confs
-  local idx conf_file domain
+  local idx conf_file domain row tls_status
 
   mapfile -t confs < <(list_managed_conf_files 0)
   if [[ ${#confs[@]} -eq 0 ]]; then
@@ -2359,13 +2358,17 @@ enable_https_from_config_list() {
     return 1
   fi
 
-  echo "请选择要开启HTTPS的配置（保留原强制跳转逻辑）："
+  echo "请选择要开启 HTTPS 的配置（开启后 HTTP 会跳转到 HTTPS）："
   for i in "${!confs[@]}"; do
-    domain="$(extract_domain_from_conf "${confs[$i]}")"
-    echo "  $((i+1))) $(basename "${confs[$i]}")  [域名: ${domain}]"
+    domain="未知"; tls_status="未知"
+    if row="$(nx_conf_query list "${confs[$i]}" 2>/dev/null)"; then
+      IFS=$'\t' read -r _ domain _ tls_status _ <<< "$row"
+      case "$tls_status" in HTTPS) tls_status="已开启" ;; HTTP) tls_status="已关闭" ;; *) tls_status="未知" ;; esac
+    fi
+    printf '  %s) 域名：%s\n     文件：%s\n     HTTPS：%s\n' "$((i+1))" "$domain" "$(basename "${confs[$i]}")" "$tls_status"
   done
-  echo "  0) 返回上一级"
-  read -rp "选择序号: " idx || return 10
+  echo "  0) 返回上级"
+  read -rp "请选择（0-${#confs[@]}）: " idx || return 10
 
   if [[ "$idx" == "0" ]]; then
     return 10
@@ -2432,7 +2435,7 @@ enable_https_for_domain_value() {
     for i in "${!matches[@]}"; do
       echo "  $((i+1))) $(basename "${matches[$i]}")"
     done
-    read -rp "选择序号: " idx || return 10
+    read -rp "请选择（1-${#matches[@]}）: " idx || return 10
     if ! nx_menu_index "$idx" "${#matches[@]}"; then
     error "无效序号。请输入列表中存在的配置编号。"
       return 1
@@ -2598,7 +2601,7 @@ PYPREP
   then
     echo '准备状态：ACME邮箱 未知 | DNS API 未知'
   fi
-  echo '仅检查本地保存项；未验证账户、凭据有效性或签发能力，敏感值不显示。'
+  echo '仅检查本地配置，未验证凭据有效性。'
 }
 
 cert_menu() {
@@ -2617,9 +2620,9 @@ cert_menu() {
     echo "4) 申请证书（DNS-01）"
     echo "5) 证书列表"
     echo "6) 开启站点HTTPS"
-    echo "0) 返回上一级"
+    echo "0) 返回上级"
     echo "========================================"
-    read -rp "请选择: " c || return 0
+    read -rp "请选择（0-6）: " c || return 0
 
     case "$c" in
       1) run_menu_action_paused set_acme_email ;;
@@ -2640,15 +2643,15 @@ realtime_info_menu() {
     clear
     echo "========== 系统信息 =========="
     if ! system_info_panel; then
-      warn "部分系统信息无法读取，仍可选择下方实时信息功能。"
+      warn "部分系统信息无法读取，仍可选择下方实时监控功能。"
     fi
-    echo "========== 实时信息 =========="
-    echo "1) 实时信息"
+    echo "========== 运行状态 =========="
+    echo "1) 实时监控"
     echo "2) 流量统计"
-    echo "3) 健康检查"
-    echo "0) 返回上一级"
+    echo "3) 站点检查"
+    echo "0) 返回上级"
     echo "============================="
-    read -rp "请选择: " c || return 0
+    read -rp "请选择（0-3）: " c || return 0
 
     case "$c" in
       1) run_menu_action show_nginx_realtime_status ;;
@@ -2798,9 +2801,9 @@ uninstall_menu() {
     echo "2) 卸载Nginx"
     echo "3) 卸载当前账户ACME"
     echo "4) 组合卸载"
-    echo "0) 返回上一级"
+    echo "0) 返回上级"
     echo "=========================="
-    read -rp "请选择: " c || return 0
+    read -rp "请选择（0-4）: " c || return 0
 
     case "$c" in
       1) run_menu_action_paused uninstall_script_only ;;
@@ -3010,10 +3013,10 @@ main_menu() {
   echo "1) 安装升级Nginx"
   echo "2) 配置管理"
   echo "3) 证书管理"
-  echo "4) 实时信息"
+  echo "4) 运行状态"
   echo "5) 更新脚本"
   echo "6) 卸载"
-  echo "0) 退出"
+  echo "0) 退出脚本"
   echo "========================================"
 }
 
@@ -3026,7 +3029,7 @@ main() {
   while true; do
     banner
     main_menu
-    read -rp "请选择功能: " choice || return 0
+    read -rp "请选择（0-6）: " choice || return 0
 
     case "$choice" in
       1) run_menu_action install_or_upgrade_nginx; pause ;;

@@ -330,8 +330,8 @@ nx_site_https_menu() {
   echo "HTTPS 状态：${status}"
   echo '1) 开启 HTTPS'
   echo '2) 关闭 HTTPS'
-  echo '0) 返回'
-  read -rp '请选择: ' choice || return 10
+  echo '0) 返回上级'
+  read -rp '请选择（0-2）: ' choice || return 10
   case "$choice" in
     1) nx_site_https_enable "$file" ;;
     2) nx_site_https_disable "$file" ;;
