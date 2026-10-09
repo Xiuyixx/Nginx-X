@@ -92,21 +92,22 @@ setup_dns_api() {
   echo "6)  华为云          (HUAWEICLOUD_Username + HUAWEICLOUD_Password)"
   echo "7)  AWS Route53     (AWS_ACCESS_KEY_ID + AWS_SECRET_ACCESS_KEY)"
   echo "8)  Google Cloud    (GCE_Project + GCE_ServiceAccountEmail)"
-  read -rp "请选择 [1-8]: " choice
+  read -rp "请选择 [1-8]: " choice || return 10
 
   case "$choice" in
-    1) provider="cf"; read -rp "Cloudflare API Token: " key1 ;;
-    2) provider="dp"; read -rp "DNSPod ID: " key1; read -rp "DNSPod Key: " key2 ;;
-    3) provider="ali"; read -rp "Aliyun AccessKey ID: " key1; read -rp "Aliyun AccessKey Secret: " key2 ;;
-    4) provider="he"; read -rp "HE.net Username: " key1; read -rp "HE.net Password: " key2 ;;
-    5) provider="gd"; read -rp "GoDaddy API Key: " key1; read -rp "GoDaddy API Secret: " key2 ;;
-    6) provider="hw"; read -rp "华为云 Username: " key1; read -rp "华为云 Password: " key2 ;;
-    7) provider="aws"; read -rp "AWS Access Key ID: " key1; read -rp "AWS Secret Access Key: " key2 ;;
-    8) provider="google"; read -rp "GCE Project: " key1; read -rp "Service Account Email: " key2 ;;
+    1) provider="cf"; read -rp "Cloudflare API Token: " key1 || return 10 ;;
+    2) provider="dp"; read -rp "DNSPod ID: " key1 || return 10; read -rp "DNSPod Key: " key2 || return 10 ;;
+    3) provider="ali"; read -rp "Aliyun AccessKey ID: " key1 || return 10; read -rp "Aliyun AccessKey Secret: " key2 || return 10 ;;
+    4) provider="he"; read -rp "HE.net Username: " key1 || return 10; read -rp "HE.net Password: " key2 || return 10 ;;
+    5) provider="gd"; read -rp "GoDaddy API Key: " key1 || return 10; read -rp "GoDaddy API Secret: " key2 || return 10 ;;
+    6) provider="hw"; read -rp "华为云 Username: " key1 || return 10; read -rp "华为云 Password: " key2 || return 10 ;;
+    7) provider="aws"; read -rp "AWS Access Key ID: " key1 || return 10; read -rp "AWS Secret Access Key: " key2 || return 10 ;;
+    8) provider="google"; read -rp "GCE Project: " key1 || return 10; read -rp "Service Account Email: " key2 || return 10 ;;
     *) error "无效选择。"; return 1 ;;
   esac
   [[ -z "$key1" ]] && { error "API Key 不能为空。"; return 1; }
 
+  [[ "$provider" == cf || -n "${key2:-}" ]] || { error "第二项凭据不能为空。"; return 1; }
   save_dns_conf "$provider" "$key1" "${key2:-}" || return 1
 
   # Export env vars for acme.sh
@@ -124,7 +125,7 @@ setup_dns_api() {
   info "DNS API 配置完成（${provider}）。"
   if confirm "是否现在测试申请证书？"; then
     local test_domain
-    read -rp "请输入测试域名: " test_domain
+    read -rp "请输入测试域名: " test_domain || return 10
     if valid_domain "$test_domain"; then
       _issue_cert_dns "$test_domain"
     fi
@@ -173,14 +174,17 @@ select_cert_mode_interactive() {
     default_choice="2"
   fi
 
-  read -rp "Choose [1-2] (default ${default_choice}): " choice
+  read -rp "Choose [1-2] (default ${default_choice}): " choice || return 10
   [[ -z "$choice" ]] && choice="$default_choice"
 
   case "$choice" in
     2)
       if ! has_dns_config; then
         >&2 warn "DNS API Token not configured, please set up first."
-        if ! setup_dns_api >&2; then
+        local setup_rc=0
+        setup_dns_api >&2 || setup_rc=$?
+        [[ "$setup_rc" != 10 ]] || return 10
+        if (( setup_rc != 0 )); then
           >&2 error "DNS API setup failed, fallback to HTTP-01."
           echo "http"
           return 0
@@ -188,10 +192,20 @@ select_cert_mode_interactive() {
       fi
       echo "dns"
       ;;
-    *)
+    1)
       echo "http"
       ;;
+    *) error "无效验证方式。" >&2; return 1 ;;
   esac
+}
+
+issue_cert_dns_interactive() {
+  local dns_domain
+  load_email
+  [[ -n "${ACME_EMAIL:-}" ]] || { error "请先设置邮箱。"; return 1; }
+  read -rp "请输入域名: " dns_domain || return 10
+  valid_domain "$dns_domain" || { error "域名格式不合法。"; return 1; }
+  _issue_cert_dns "$dns_domain"
 }
 
 _issue_cert_dns() {
@@ -554,7 +568,7 @@ enable_acme_cron() {
 
 set_acme_email() {
   local email
-  read -rp "请输入证书通知邮箱: " email
+  read -rp "请输入证书通知邮箱: " email || return 10
   if [[ ! "$email" =~ ^[^@[:space:]]+@[^@[:space:]]+\.[^@[:space:]]+$ ]]; then
     error "邮箱格式不合法。请输入类似 user@example.com 的邮箱地址。"
     return 1
@@ -570,7 +584,7 @@ ensure_email_interactive() {
   fi
 
   warn "当前未设置 Acme 邮箱。"
-  read -rp "请输入邮箱（将保存到 ${EMAIL_CONF}）: " email
+  read -rp "请输入邮箱（将保存到 ${EMAIL_CONF}）: " email || return 10
   if [[ ! "$email" =~ ^[^@[:space:]]+@[^@[:space:]]+\.[^@[:space:]]+$ ]]; then
     error "邮箱格式不合法。请输入类似 user@example.com 的邮箱地址。"
     return 1
@@ -721,13 +735,13 @@ issue_cert() {
     return 1
   fi
 
-  read -rp "请输入要申请证书的域名: " domain
+  read -rp "请输入要申请证书的域名: " domain || return 10
   if ! valid_domain "$domain"; then
     error "域名格式不合法。请输入可签发证书的域名，例如 example.com。"
     return 1
   fi
 
-  cert_mode="$(select_cert_mode_interactive)"
+  cert_mode="$(select_cert_mode_interactive)" || return $?
 
   if [[ "$cert_mode" == "dns" ]]; then
     _issue_cert_dns "$domain"
@@ -792,10 +806,14 @@ cert_list_action_menu() {
         if has_acme_cron_task; then
           if confirm "当前 ACME 账户全部证书的续期已开启，是否全部关闭？"; then
             run_menu_action disable_acme_cron
+          else
+            return 0
           fi
         else
           if confirm "当前 ACME 账户全部证书的续期未开启，是否全部开启？"; then
             run_menu_action enable_acme_cron
+          else
+            return 0
           fi
         fi
         pause
@@ -813,7 +831,6 @@ cert_list_action_menu() {
 
         if ! confirm "确认删除证书 ${domain} ?"; then
           info "已取消。"
-          pause
           return 0
         fi
 
@@ -869,7 +886,7 @@ cert_list_menu() {
     if [[ "$idx" == "0" ]]; then
       return 0
     fi
-    if ! [[ "$idx" =~ ^[0-9]+$ ]] || (( idx < 1 || idx > ${#certs[@]} )); then
+    if ! nx_menu_index "$idx" "${#certs[@]}"; then
       warn "无效编号。请输入证书列表中存在的编号。"
       pause
       continue

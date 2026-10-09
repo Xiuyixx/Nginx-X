@@ -15,7 +15,7 @@ NC='\033[0m'
 
 # ---------- 全局变量 ----------
 APP_NAME="Nginx-X"
-APP_VERSION="3.4.3"
+APP_VERSION="3.4.4"
 # Alpine 的 nginx 把 server 配置放在 http.d，其他系统用 conf.d
 if [[ -f /etc/nginx/http.d ]] || [[ -d /etc/nginx/http.d ]]; then
   CONF_DIR="/etc/nginx/http.d"
@@ -61,7 +61,8 @@ cleanup_tmp_file() {
 
 confirm() {
   local prompt="$1"
-  read -rp "${prompt} [y/N]: " ans
+  local ans
+  read -rp "${prompt} [y/N]: " ans || return 1
   [[ "$ans" =~ ^[Yy]$ ]]
 }
 
@@ -70,12 +71,14 @@ run_menu_action() {
   # After uninstalling packages (e.g. nginx), the cached path can point to a deleted binary.
   # Refresh hash table before each menu action so check_cmd / execution are accurate.
   hash -r 2>/dev/null || true
-  if ! "$@"; then
+  local rc=0
+  "$@" || rc=$?
+  if (( rc != 0 && rc != 10 )); then
     warn "操作未完成，请查看上方错误信息。"
   fi
 }
 
-# Only navigation screens use status 10: back/cancel/EOF, not an action error.
+# Status 10 means back/cancel/EOF, not an action error.
 # Consume it here so set -e never exits the parent menu. No persistent flags.
 run_menu_action_paused() {
   local rc=0
@@ -84,6 +87,12 @@ run_menu_action_paused() {
   [[ "$rc" != 10 ]] || return 0
   if (( rc != 0 )); then warn "操作未完成，请查看上方错误信息。"; fi
   pause
+}
+
+# Canonical decimal list indexes only; length guard prevents arithmetic wraparound.
+nx_menu_index() {
+  local value="$1" count="$2"
+  [[ "$value" =~ ^[1-9][0-9]*$ && ${#value} -le ${#count} ]] && (( value <= count ))
 }
 
 install_managed_file() {
@@ -1232,17 +1241,18 @@ select_external_mode() {
 
   if [[ "$scope" == "internal" ]]; then
     [[ "$current" == "streaming" ]] && choice="2" || choice="1"
-    read -rp "选择模式（1-2） (默认 ${choice}): " input_mode
+    read -rp "选择模式（1-2） (默认 ${choice}): " input_mode || return 10
     [[ -n "$input_mode" ]] && choice="$input_mode"
     # Legacy 6 is an undisplayed alias; internal numbers never select media.
     case "$choice" in
       2|6) echo "streaming" ;;
-      *) echo "normal" ;;
+      1) echo "normal" ;;
+      *) error "无效模式。" >&2; return 1 ;;
     esac
     return
   fi
 
-  read -rp "选择模式（1-6） (默认 ${choice}): " input_mode
+  read -rp "选择模式（1-6） (默认 ${choice}): " input_mode || return 10
   [[ -n "$input_mode" ]] && choice="$input_mode"
 
   case "$choice" in
@@ -1251,7 +1261,8 @@ select_external_mode() {
     3) echo "emby_http" ;;
     4) echo "emby_https" ;;
     5) echo "emby_lily" ;;
-    *) echo "normal" ;;
+    1) echo "normal" ;;
+    *) error "无效模式。" >&2; return 1 ;;
   esac
 }
 
@@ -1275,7 +1286,7 @@ ensure_cert_for_domain_interactive() {
   fi
 
   if [[ -z "$cert_mode" ]]; then
-    cert_mode="$(select_cert_mode_interactive)"
+    cert_mode="$(select_cert_mode_interactive)" || return $?
   fi
 
   if ! issue_cert_for_domain "$domain" "$cert_mode"; then
@@ -1299,25 +1310,25 @@ add_reverse_proxy() {
 
   require_nginx_installed || return 1
 
-  read -rp "请输入域名或本机IP（如 example.com / 192.168.1.10）: " domain
+  read -rp "请输入域名或本机IP（如 example.com / 192.168.1.10）: " domain || return 10
   if ! valid_server_name_input "$domain"; then
     error "输入格式不合法。请输入可解析域名，或 IPv4 地址（例如 192.168.1.10）。"
     return 1
   fi
 
-  read -rp "请输入监听端口（如 80/8080）: " listen_port
+  read -rp "请输入监听端口（如 80/8080）: " listen_port || return 10
   if ! valid_port "$listen_port"; then
     error "监听端口不合法。请输入 1-65535 之间的数字。"
     return 1
   fi
 
-  read -rp "请输入后端/容器端口（如 3000）: " backend_port
+  read -rp "请输入后端/容器端口（如 3000）: " backend_port || return 10
   if ! valid_port "$backend_port"; then
     error "后端端口不合法。请输入 1-65535 之间的数字。"
     return 1
   fi
 
-  proxy_mode="$(select_external_mode normal internal)"
+  proxy_mode="$(select_external_mode normal internal)" || return $?
 
   nx_assert_new_target "$(conf_target_path "$domain" "$listen_port")" || return 1
 
@@ -1402,7 +1413,7 @@ add_reverse_proxy() {
           warn "邮箱未设置成功，已跳过自动证书流程。你可稍后在证书管理里设置。"
         else
           local selected_cert_mode
-          selected_cert_mode="$(select_cert_mode_interactive)"
+          selected_cert_mode="$(select_cert_mode_interactive)" || return $?
           if issue_cert_for_domain "$domain" "$selected_cert_mode"; then
             if enable_https_for_conf_file "$domain" "$target" "$desired_port"; then
               info "已完成：反向代理 + 证书 + HTTPS 启用。"
@@ -1429,13 +1440,13 @@ add_external_url_proxy() {
 
   require_nginx_installed || return 1
 
-  read -rp "请输入域名或本机IP（如 example.com / 192.168.1.10）: " domain
+  read -rp "请输入域名或本机IP（如 example.com / 192.168.1.10）: " domain || return 10
   if ! valid_server_name_input "$domain"; then
     error "输入格式不合法。请输入可解析域名，或 IPv4 地址（例如 192.168.1.10）。"
     return 1
   fi
 
-  read -rp "请输入监听端口（如 80/8080）: " listen_port
+  read -rp "请输入监听端口（如 80/8080）: " listen_port || return 10
   if ! valid_port "$listen_port"; then
     error "监听端口不合法。请输入 1-65535 之间的数字。"
     return 1
@@ -1446,16 +1457,16 @@ add_external_url_proxy() {
   desired_port="$listen_port"
   create_port="$listen_port"
 
-  read -rp "请输入外部上游 URL（http/https）: " upstream_url
+  read -rp "请输入外部上游 URL（http/https）: " upstream_url || return 10
   if ! valid_url "$upstream_url"; then
     error "上游 URL 格式不合法。必须以 http:// 或 https:// 开头，且不含特殊字符（{}\\;）。"
     return 1
   fi
 
-  external_mode="$(select_external_mode normal)"
+  external_mode="$(select_external_mode normal)" || return $?
 
   if [[ "$external_mode" =~ ^emby_ ]]; then
-    read -rp "请输入推流节点 URL（多个可用英文逗号分隔）: " stream_upstream_url
+    read -rp "请输入推流节点 URL（多个可用英文逗号分隔）: " stream_upstream_url || return 10
     if ! stream_upstream_urls="$(normalize_url_list "$stream_upstream_url")"; then
       error "推流节点 URL 格式不合法。必须以 http:// 或 https:// 开头，且不含特殊字符。"
       return 1
@@ -1464,14 +1475,14 @@ add_external_url_proxy() {
     IFS='|' read -r -a _stream_urls <<< "$stream_upstream_urls"
     stream_upstream_url="${_stream_urls[0]}"
 
-    read -rp "请输入源站公开 URL（用于重定向/替换，默认与主上游相同）: " source_site_url
+    read -rp "请输入源站公开 URL（用于重定向/替换，默认与主上游相同）: " source_site_url || return 10
     [[ -z "$source_site_url" ]] && source_site_url="$upstream_url"
     if ! valid_url "$source_site_url"; then
       error "源站公开 URL 格式不合法。必须以 http:// 或 https:// 开头，且不含特殊字符。"
       return 1
     fi
 
-    read -rp "请输入 Referer URL（默认 ${source_site_url%/}/web/index.html）: " referer_url
+    read -rp "请输入 Referer URL（默认 ${source_site_url%/}/web/index.html）: " referer_url || return 10
     [[ -z "$referer_url" ]] && referer_url="$(default_referer_from_url "$source_site_url")"
   fi
 
@@ -1549,7 +1560,7 @@ add_external_url_proxy() {
           warn "邮箱未设置成功，已跳过自动证书流程。你可稍后在证书管理里设置。"
         else
           local selected_cert_mode
-          selected_cert_mode="$(select_cert_mode_interactive)"
+          selected_cert_mode="$(select_cert_mode_interactive)" || return $?
           if issue_cert_for_domain "$domain" "$selected_cert_mode"; then
             if enable_https_for_conf_file "$domain" "$target" "$desired_port"; then
               info "已完成：外部反代 + 证书 + HTTPS 启用。"
@@ -1683,21 +1694,21 @@ modify_conf() {
   fi
   [[ -z "$current_backend" ]] && current_backend="3000"
 
-  read -rp "新的域名（当前 ${current_domain}）: " new_domain
+  read -rp "新的域名（当前 ${current_domain}）: " new_domain || return 10
   [[ -z "$new_domain" ]] && new_domain="$current_domain"
   if ! valid_server_name_input "$new_domain"; then
     error "域名/IP 格式不合法。请输入可解析域名，或 IPv4 地址（例如 192.168.1.10）。"
     return 1
   fi
 
-  read -rp "新的监听端口（当前 ${current_listen}）: " new_listen
+  read -rp "新的监听端口（当前 ${current_listen}）: " new_listen || return 10
   [[ -z "$new_listen" ]] && new_listen="$current_listen"
   if ! valid_port "$new_listen"; then
     error "监听端口不合法。请输入 1-65535 之间的数字。"
     return 1
   fi
 
-  read -rp "新的后端端口（当前 ${current_backend}）: " new_backend
+  read -rp "新的后端端口（当前 ${current_backend}）: " new_backend || return 10
   [[ -z "$new_backend" ]] && new_backend="$current_backend"
   if ! valid_port "$new_backend"; then
     error "后端端口不合法。请输入 1-65535 之间的数字。"
@@ -1707,7 +1718,7 @@ modify_conf() {
   current_mode="$(conf_meta_get "$src" proxy_mode)"
   [[ -n "$current_mode" ]] || current_mode="normal"
   note "当前方案：$(external_mode_name "$current_mode")"
-  new_mode="$(select_external_mode "$current_mode" internal)"
+  new_mode="$(select_external_mode "$current_mode" internal)" || return $?
 
   # 监听端口占用检查（允许当前 nginx 使用旧配置的场景较复杂，这里采取严格策略）
   if is_port_used_os "$new_listen"; then
@@ -1762,21 +1773,21 @@ modify_external_conf() {
 
   [[ ! "$file" =~ \.conf$ ]] && was_disabled=1
 
-  read -rp "新的域名（当前 ${current_domain}）: " new_domain
+  read -rp "新的域名（当前 ${current_domain}）: " new_domain || return 10
   [[ -z "$new_domain" ]] && new_domain="$current_domain"
   if ! valid_server_name_input "$new_domain"; then
     error "域名/IP 格式不合法。请输入可解析域名，或 IPv4 地址（例如 192.168.1.10）。"
     return 1
   fi
 
-  read -rp "新的监听端口（当前 ${current_listen}）: " new_listen
+  read -rp "新的监听端口（当前 ${current_listen}）: " new_listen || return 10
   [[ -z "$new_listen" ]] && new_listen="$current_listen"
   if ! valid_port "$new_listen"; then
     error "监听端口不合法。请输入 1-65535 之间的数字。"
     return 1
   fi
 
-  read -rp "新的主上游 URL（当前 ${current_upstream_url}）: " new_upstream_url
+  read -rp "新的主上游 URL（当前 ${current_upstream_url}）: " new_upstream_url || return 10
   [[ -z "$new_upstream_url" ]] && new_upstream_url="$current_upstream_url"
   if ! valid_url "$new_upstream_url"; then
     error "主上游 URL 格式不合法。必须以 http:// 或 https:// 开头，且不含特殊字符。"
@@ -1784,7 +1795,7 @@ modify_external_conf() {
   fi
 
   note "当前方案：$(external_mode_name "$current_mode")"
-  new_mode="$(select_external_mode "$current_mode")"
+  new_mode="$(select_external_mode "$current_mode")" || return $?
 
   new_stream_upstream_url="$current_stream_upstream_url"
   new_stream_upstream_urls="$current_stream_upstream_urls"
@@ -1794,7 +1805,7 @@ modify_external_conf() {
   if [[ "$new_mode" =~ ^emby_ ]]; then
     local current_stream_display="${current_stream_upstream_urls:-$current_stream_upstream_url}"
     [[ -z "$current_stream_display" ]] && current_stream_display="未设置"
-    read -rp "新的推流节点 URL（多个可用英文逗号分隔，当前 ${current_stream_display}）: " input_stream
+    read -rp "新的推流节点 URL（多个可用英文逗号分隔，当前 ${current_stream_display}）: " input_stream || return 10
     if [[ -n "$input_stream" ]]; then
       if ! new_stream_upstream_urls="$(normalize_url_list "$input_stream")"; then
         error "推流节点 URL 格式不合法。必须以 http:// 或 https:// 开头，且不含特殊字符。"
@@ -1813,7 +1824,7 @@ modify_external_conf() {
     IFS='|' read -r -a _stream_urls <<< "$new_stream_upstream_urls"
     new_stream_upstream_url="${_stream_urls[0]}"
 
-    read -rp "新的源站公开 URL（当前 ${current_source_site_url:-$new_upstream_url}）: " input_source
+    read -rp "新的源站公开 URL（当前 ${current_source_site_url:-$new_upstream_url}）: " input_source || return 10
     [[ -n "$input_source" ]] && new_source_site_url="$input_source"
     [[ -z "$new_source_site_url" ]] && new_source_site_url="$new_upstream_url"
     if ! valid_url "$new_source_site_url"; then
@@ -1821,7 +1832,7 @@ modify_external_conf() {
       return 1
     fi
 
-    read -rp "新的 Referer URL（当前 ${current_referer_url:-$(default_referer_from_url "$new_source_site_url")}) : " input_referer
+    read -rp "新的 Referer URL（当前 ${current_referer_url:-$(default_referer_from_url "$new_source_site_url")}) : " input_referer || return 10
     [[ -n "$input_referer" ]] && new_referer_url="$input_referer"
     [[ -z "$new_referer_url" ]] && new_referer_url="$(default_referer_from_url "$new_source_site_url")"
   else
@@ -1865,7 +1876,7 @@ config_file_action_menu() {
     case "$c" in
       1) run_menu_action enable_conf "$file"; pause; return 0 ;;
       2) run_menu_action disable_conf "$file"; pause; return 0 ;;
-      3) run_menu_action modify_conf "$file"; pause; return 0 ;;
+      3) run_menu_action_paused modify_conf "$file"; return 0 ;;
       4) run_menu_action edit_conf_manual "$file"; pause; return 0 ;;
       5) run_menu_action delete_conf "$file"; pause; return 0 ;;
       6) run_menu_action_paused nx_home_menu "$CONF_DIR/$file" ;;
@@ -1900,7 +1911,7 @@ config_manage_menu() {
       return 0
     fi
 
-    if ! [[ "$c" =~ ^[0-9]+$ ]] || (( c < 1 || c > ${#FILES[@]} )); then
+    if ! nx_menu_index "$c" "${#FILES[@]}"; then
       warn "无效序号。请输入列表中存在的配置编号。"
       pause
       continue
@@ -2183,7 +2194,7 @@ dns_setup_menu() {
     echo "========== 系统 DNS 设置 =========="
     echo "当前 DNS 配置："
     if [[ -f "$resolv_path" ]]; then
-      grep -E '^nameserver' "$resolv_path" 2>/dev/null | while read -r line; do
+      { grep -E '^nameserver' "$resolv_path" 2>/dev/null || true; } | while read -r line; do
         echo "  ${line}"
       done
     else
@@ -2208,12 +2219,12 @@ dns_setup_menu() {
       3) ns1="223.5.5.5"; ns2="223.6.6.6" ;;
       4) ns1="119.29.29.29"; ns2="" ;;
       5)
-        read -rp "请输入首选 DNS: " ns1
+        read -rp "请输入首选 DNS: " ns1 || return 0
         [[ -z "$ns1" ]] && { error "DNS 不能为空。"; pause; continue; }
-        read -rp "请输入备用 DNS (可留空): " ns2
+        read -rp "请输入备用 DNS (可留空): " ns2 || return 0
         ;;
       0) return 0 ;;
-      *) warn "无效输入。请输入 0-8 之间的菜单编号。"; pause; continue ;;
+      *) warn "无效输入。请输入 0-5 之间的菜单编号。"; pause; continue ;;
     esac
 
     if ! valid_dns_address "$ns1" || { [[ -n "$ns2" ]] && ! valid_dns_address "$ns2"; }; then
@@ -2281,8 +2292,8 @@ config_entry_menu() {
     read -rp "请选择: " c || return 0
 
     case "$c" in
-      1) run_menu_action add_reverse_proxy; pause ;;
-      2) run_menu_action add_external_url_proxy; pause ;;
+      1) run_menu_action_paused add_reverse_proxy ;;
+      2) run_menu_action_paused add_external_url_proxy ;;
       3) config_manage_menu ;;
       4) run_menu_action import_existing_confs; pause ;;
       5) dns_setup_menu ;;
@@ -2329,7 +2340,7 @@ enable_https_from_config_list() {
   if [[ "$idx" == "0" ]]; then
     return 10
   fi
-  if ! [[ "$idx" =~ ^[0-9]+$ ]] || (( idx < 1 || idx > ${#confs[@]} )); then
+  if ! nx_menu_index "$idx" "${#confs[@]}"; then
     error "无效序号。请输入列表中存在的配置编号。"
     return 1
   fi
@@ -2368,7 +2379,7 @@ enable_https_from_config_list() {
     fi
 
     local selected_cert_mode
-    selected_cert_mode="$(select_cert_mode_interactive)"
+    selected_cert_mode="$(select_cert_mode_interactive)" || return $?
     if ! issue_cert_for_domain "$domain" "$selected_cert_mode"; then
       error "证书申请失败，无法继续启用 HTTPS。请检查域名解析、端口放行或 DNS API 配置。"
       return 1
@@ -2401,8 +2412,8 @@ enable_https_for_domain_value() {
     for i in "${!matches[@]}"; do
       echo "  $((i+1))) $(basename "${matches[$i]}")"
     done
-    read -rp "选择序号: " idx
-    if ! [[ "$idx" =~ ^[0-9]+$ ]] || (( idx < 1 || idx > ${#matches[@]} )); then
+    read -rp "选择序号: " idx || return 10
+    if ! nx_menu_index "$idx" "${#matches[@]}"; then
     error "无效序号。请输入列表中存在的配置编号。"
       return 1
     fi
@@ -2542,10 +2553,10 @@ cert_menu() {
     read -rp "请选择: " c || return 0
 
     case "$c" in
-      1) run_menu_action set_acme_email; pause ;;
-      2) run_menu_action issue_cert; pause ;;
-      3) run_menu_action setup_dns_api; pause ;;
-      4) local dns_domain; load_email; if [[ -z "${ACME_EMAIL:-}" ]]; then error "请先设置邮箱。"; pause; else read -rp "请输入域名: " dns_domain; if valid_domain "$dns_domain"; then _issue_cert_dns "$dns_domain"; fi; pause; fi ;;
+      1) run_menu_action_paused set_acme_email ;;
+      2) run_menu_action_paused issue_cert ;;
+      3) run_menu_action_paused setup_dns_api ;;
+      4) run_menu_action_paused issue_cert_dns_interactive ;;
       5) cert_list_menu ;;
       6) run_menu_action_paused enable_https_for_domain ;;
       0) return 0 ;;
@@ -2571,9 +2582,9 @@ realtime_info_menu() {
     read -rp "请选择: " c || return 0
 
     case "$c" in
-      1) show_nginx_realtime_status ;;
-      2) show_traffic_stats ;;
-      3) site_health_menu ;;
+      1) run_menu_action show_nginx_realtime_status ;;
+      2) run_menu_action show_traffic_stats ;;
+      3) run_menu_action site_health_menu ;;
       0) return 0 ;;
       *) warn "无效输入。请输入 0-3 之间的菜单编号。"; pause ;;
     esac
@@ -2586,7 +2597,7 @@ uninstall_script_only() {
   note "将执行：卸载当前已登记的 nx 安装入口。"
   if ! confirm "确认继续卸载本脚本？"; then
     info "已取消。"
-    return 0
+    return "${NX_UNINSTALL_CANCEL_RC:-0}"
   fi
 
   local installed_bin
@@ -2675,22 +2686,23 @@ uninstall_all() {
   warn "该操作会清理证书和脚本入口。"
   if ! confirm "确认继续全部卸载？"; then
     info "已取消。"
-    return 0
+    return "${NX_UNINSTALL_CANCEL_RC:-0}"
   fi
 
   if ! confirm "这是最高风险操作，是否再次确认全部卸载？"; then
     info "已取消。"
-    return 0
+    return "${NX_UNINSTALL_CANCEL_RC:-0}"
   fi
 
   # Only composite orchestration distinguishes cancellation from completion;
   # standalone menus retain their normal successful-cancel behavior.
   # shellcheck disable=SC2034
+  local parent_cancel_rc="${NX_UNINSTALL_CANCEL_RC:-0}"
   local NX_UNINSTALL_CANCEL_RC=2
   local phase_rc
   if uninstall_nginx_only; then :; else
     phase_rc=$?
-    [[ $phase_rc == 2 ]] && return 0
+    [[ $phase_rc == 2 ]] && return "$parent_cancel_rc"
     return "$phase_rc"
   fi
   # Also refuse alternative installations left behind by the package manager.
@@ -2700,13 +2712,14 @@ uninstall_all() {
   fi
   if uninstall_acme_only offline; then :; else
     phase_rc=$?
-    [[ $phase_rc == 2 ]] && return 0
+    [[ $phase_rc == 2 ]] && return "$parent_cancel_rc"
     return "$phase_rc"
   fi
   uninstall_script_only
 }
 
 uninstall_menu() {
+  local NX_UNINSTALL_CANCEL_RC=10
   while true; do
     clear
     echo "========== 卸载 =========="
@@ -2719,10 +2732,10 @@ uninstall_menu() {
     read -rp "请选择: " c || return 0
 
     case "$c" in
-      1) run_menu_action uninstall_script_only; pause ;;
-      2) run_menu_action uninstall_nginx_only; pause ;;
-      3) run_menu_action uninstall_acme_only; pause ;;
-      4) run_menu_action uninstall_all; pause ;;
+      1) run_menu_action_paused uninstall_script_only ;;
+      2) run_menu_action_paused uninstall_nginx_only ;;
+      3) run_menu_action_paused uninstall_acme_only ;;
+      4) run_menu_action_paused uninstall_all ;;
       0) return 0 ;;
       *) warn "无效输入。请输入 0-4 之间的菜单编号。"; pause ;;
     esac

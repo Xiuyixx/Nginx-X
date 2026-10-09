@@ -396,7 +396,7 @@ site_health_menu() {
   local -a confs
   local idx conf_file bad=0 total=0
 
-  require_nginx_installed || return 1
+  require_nginx_installed || { pause; return 0; }
 
   while true; do
     clear
@@ -449,7 +449,7 @@ site_health_menu() {
         if [[ "$idx" == "0" ]]; then
           continue
         fi
-        if ! [[ "$idx" =~ ^[0-9]+$ ]] || (( idx < 1 || idx > ${#confs[@]} )); then
+        if ! nx_menu_index "$idx" "${#confs[@]}"; then
           warn "无效序号。请输入列表中存在的配置编号。"
           pause
           continue
@@ -504,7 +504,7 @@ nginx_proc_counters() {
 }
 
 show_nginx_realtime_status() {
-  require_nginx_installed || return 1
+  require_nginx_installed || { pause; return 0; }
 
 
   local prev_requests=0 prev_rx=0 prev_tx=0 initialized=0 prev_time=0 prev_ticks=0
@@ -618,7 +618,7 @@ EOF
 }
 
 show_traffic_stats() {
-  require_nginx_installed || return 1
+  require_nginx_installed || { pause; return 0; }
 
   local host_log_file="${NX_HOST_LOG:-/var/log/nginx/access.host.log}"
   local prev_rx=0 prev_tx=0 initialized=0 prev_time=0

@@ -13,14 +13,14 @@ nx_backend_enable() {
   policy="$(nx_access_site_policy "$file")" || return 1
   [[ "$policy" == strict ]] || { printf 'backend: strict active site required\n' >&2; return 1; }
   # No noninteractive environment variable can substitute for explicit consent.
-  confirm "保护后端会安装 nftables/systemd 规则；本站必须先解除保护才能修改。这将阻断所有共享后端端口使用者的非回环入站（IPv4/IPv6），保留本机 nginx 回环连接；确认启用？" || return 1
+  confirm "保护后端会安装 nftables/systemd 规则；本站必须先解除保护才能修改。这将阻断所有共享后端端口使用者的非回环入站（IPv4/IPv6），保留本机 nginx 回环连接；确认启用？" || return 10
   _nx_backend_engine enable "$file" "$policy"
 }
 nx_backend_disable() {
   local file="${1:-}"
   [[ -n "$file" ]] || return 1
   [[ "$file" == /* ]] || file="${CONF_DIR:?}/$file"
-  confirm "确认解除本站后端保护（其他站点共享端口仍受保护）？" || return 1
+  confirm "确认解除本站后端保护（其他站点共享端口仍受保护）？" || return 10
   _nx_backend_engine disable "$file"
 }
 nx_backend_status() {

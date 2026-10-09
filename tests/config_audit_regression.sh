@@ -65,17 +65,17 @@ nx_https_transform enable "$T/http" example.com "$SSL_DIR" 18443 > "$CONF_DIR/ex
 nx_access_set_policy "$CONF_DIR/example.com-18443.conf" strict
 nx_access_set_default "$CONF_DIR/example.com-18443.conf" '0.0.0.0:18443'
 printf '' > "$T/applies"
-modify_conf example.com-18443.conf <<< $'\n18444\n3001' >/dev/null
+modify_conf example.com-18443.conf <<< $'\n18444\n3001\n' >/dev/null
 [[ "$(wc -l < "$T/applies")" == 1 ]]
 conf_https_enabled "$CONF_DIR/example.com-18444.conf"
 [[ "$(conf_meta_get "$CONF_DIR/example.com-18444.conf" https_original_listen_port)" == 18080 ]]
 [[ "$(conf_meta_get "$CONF_DIR/example.com-18444.conf" access_default)" == '0.0.0.0:18444' ]]
 grep -q 'proxy_pass http://127.0.0.1:3001;' "$CONF_DIR/example.com-18444.conf"
 cp "$CONF_DIR/example.com-18444.conf" "$T/before"
-if modify_conf example.com-18444.conf <<< $'missing.example\n\n3002' >/dev/null 2>&1; then exit 1; fi
+if modify_conf example.com-18444.conf <<< $'missing.example\n\n3002\n' >/dev/null 2>&1; then exit 1; fi
 cmp "$T/before" "$CONF_DIR/example.com-18444.conf"
 touch "$T/fail"
-if modify_conf example.com-18444.conf <<< $'\n\n3002' >/dev/null 2>&1; then exit 1; fi
+if modify_conf example.com-18444.conf <<< $'\n\n3002\n' >/dev/null 2>&1; then exit 1; fi
 cmp "$T/before" "$CONF_DIR/example.com-18444.conf"
 rm "$T/fail"
 # External disabled HTTPS also publishes only its final disabled configuration.
@@ -85,7 +85,7 @@ cp "$SSL_DIR/example.com/"*.pem "$SSL_DIR/external.example/"
 nx_https_transform enable "$T/ext" external.example "$SSL_DIR" 18445 > "$CONF_DIR/external.example-18445.conf.bak"
 select_external_mode() { echo normal; }
 printf '' > "$T/applies"
-modify_conf external.example-18445.conf.bak <<< $'\n\nhttp://127.0.0.1:3003' >/dev/null
+modify_conf external.example-18445.conf.bak <<< $'\n\nhttp://127.0.0.1:3003\n' >/dev/null
 [[ "$(wc -l < "$T/applies")" == 1 ]]
 [[ ! -e "$CONF_DIR/external.example-18445.conf" ]]
 conf_https_enabled "$CONF_DIR/external.example-18445.conf.bak"
@@ -121,7 +121,7 @@ rm "$CONF_DIR/unmanaged.conf"
 # Plain default selection follows exact application sockets during a port move.
 build_proxy_conf plain.example 18100 3000 "$CONF_DIR/plain.example-18100.conf"
 nx_access_set_default "$CONF_DIR/plain.example-18100.conf" '0.0.0.0:18100'
-modify_conf plain.example-18100.conf <<< $'\n18101\n3001' >/dev/null
+modify_conf plain.example-18100.conf <<< $'\n18101\n3001\n' >/dev/null
 [[ "$(conf_meta_get "$CONF_DIR/plain.example-18101.conf" access_default)" == '0.0.0.0:18101' ]]
 # A TERM delivered inside the mutation restores all snapshotted files.
 cp "$CONF_DIR/plain.example-18101.conf" "$T/plain-before"

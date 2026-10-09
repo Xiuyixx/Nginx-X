@@ -407,7 +407,7 @@ nx_domain_enable() (
   # shellcheck disable=SC2034 # transaction reads dynamically scoped context
   local NX_DOMAIN_ACTION=enable NX_DOMAIN_FILE="$1"
   [[ $EUID == 0 ]] || { error '组合保护请使用 sudo 启动 Nginx-X（需要 root 私有快照与防火墙锁）。'; return 1; }
-  confirm '开启将同时限制 Nginx 域名入口并安装 nftables/systemd 本机后端保护；所有共享后端端口的远端访问都会被阻断，保留本机回环。确认开启？' || return 1
+  confirm '开启将同时限制 Nginx 域名入口并安装 nftables/systemd 本机后端保护；所有共享后端端口的远端访问都会被阻断，保留本机回环。确认开启？' || return 10
   if ! nx_transaction nx_access_set_policy_files "$1" strict; then
     error '开启未完成：需支持本机后端保护；外部/静态或不支持环境请在高级设置仅限制 Nginx。原设置已尝试恢复。'
     return 1
@@ -417,7 +417,7 @@ nx_domain_enable() (
 nx_domain_disable() (
   # shellcheck disable=SC2034 # transaction reads dynamically scoped context
   local NX_DOMAIN_ACTION=disable NX_DOMAIN_FILE="$1"
-  confirm '关闭会取消本站后端保护引用并解除 Nginx 域名限制；无其他共享引用时后端可能重新暴露公网。关闭不会自动设置 IP 默认入口。确认关闭？' || return 1
+  confirm '关闭会取消本站后端保护引用并解除 Nginx 域名限制；无其他共享引用时后端可能重新暴露公网。关闭不会自动设置 IP 默认入口。确认关闭？' || return 10
   local backend
   backend="$(nx_backend_status "$1")" || return 1
   if [[ "$backend" != *'"sites": {'* || "$backend" == *'"sites": {}'* ]]; then
@@ -486,7 +486,7 @@ nx_site_access_advanced_menu() {
     echo '0) 返回'
     read -rp '请选择: ' c || return 10
     case "$c" in
-      1) confirm '仅限制 Nginx，不阻止后端 IP:端口 直连。确认？' || return 1
+      1) confirm '仅限制 Nginx，不阻止后端 IP:端口 直连。确认？' || return 10
          nx_access_set_policy "$file" strict || return 1
          info '仅 Nginx 入口已开启；后端直连未保护。' ;;
       2) nx_backend_enable "$file" ;;
@@ -519,7 +519,7 @@ nx_default_site_menu() {
     0) return 10 ;;
     c|C) nx_access_set_default "$file" ''; return ;;
   esac
-  [[ "$choice" =~ ^[1-9][0-9]*$ ]] && ((choice<=${#sockets[@]})) || return 1
+  nx_menu_index "$choice" "${#sockets[@]}" || { warn '无效序号。'; return 1; }
   socket="${sockets[$((choice-1))]}"
   if [[ ",$defaults," != *",$socket,"* ]]; then defaults="${defaults:+$defaults,}$socket"; fi
   nx_access_set_default "$file" "$defaults"

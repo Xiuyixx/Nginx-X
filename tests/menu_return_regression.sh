@@ -140,3 +140,36 @@ printf 'RETURNED\n'
             proc.wait()
         os.close(master)
 PY
+
+# Actual timed reads: timeout refreshes, a key returns, EOF never spins.
+python3 - "$PWD/nx.sh" "$root/bundle" <<'PYREFRESH'
+import os, pty, select, subprocess, sys, time
+for entry in sys.argv[1:]:
+    for menu in ('show_nginx_realtime_status', 'show_traffic_stats'):
+        master, slave = pty.openpty()
+        script = r'''source "$1"
+clear() { :; }
+require_nginx_installed() { :; }
+nx_stub_status() { return 1; }
+"$2"
+printf 'RETURNED\n'
+'''
+        proc = subprocess.Popen(['bash', '-c', script, 'test', entry, menu],
+                                stdin=slave, stdout=slave, stderr=slave)
+        os.close(slave)
+        output = b''
+        try:
+            deadline = time.monotonic() + 20
+            while output.count('每5秒自动刷新'.encode()) < 2:
+                assert time.monotonic() < deadline, output.decode(errors='replace')
+                if select.select([master], [], [], .1)[0]:
+                    output += os.read(master, 65536)
+            os.write(master, b'\n')
+            assert proc.wait(timeout=5) == 0
+            print('PASS: PTY timeout refresh and key return:', os.path.basename(entry), menu)
+        finally:
+            if proc.poll() is None:
+                proc.kill()
+                proc.wait()
+            os.close(master)
+PYREFRESH

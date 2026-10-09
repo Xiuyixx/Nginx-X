@@ -26,11 +26,15 @@ assert not any(x in s for x in ['proxy_request_buffering','client_max_body_size'
 PY
 }
 # Exercise the real selector: scoped display, defaults, aliases and invalid input.
-for item in '1 normal' '2 streaming' '6 streaming' '3 normal' '4 normal' '5 normal' 'invalid normal' '0 normal'; do
+for item in '1 normal' '2 streaming' '6 streaming'; do
  read -r number mode <<< "$item"
  [[ "$(select_external_mode normal internal <<< "$number" 2> "$root/menu")" == "$mode" ]]
  grep -q '^2) 流式反代' "$root/menu"
  if grep -q '^6)\|Emby\|Jellyfin' "$root/menu"; then exit 1; fi
+done
+for number in 3 4 5 invalid 0; do
+ if select_external_mode normal internal <<< "$number" > "$root/invalid" 2>/dev/null; then exit 1; fi
+ [[ ! -s "$root/invalid" ]]
 done
 for item in 'normal normal' 'streaming streaming' 'media normal'; do
  read -r current mode <<< "$item"
