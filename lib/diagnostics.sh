@@ -153,6 +153,115 @@ except Exception:
   esac
 }
 
+# Bounded read-only socket probes. TLS verification is deliberately separate
+# from routing: the normal curl probe above remains certificate-validating.
+health_socket_policy() {
+  local selected="$1" inventory='' row file global=open known=1
+  nx_conf_query health-main "$NGINX_MAIN_CONF" "$CONF_DIR" >/dev/null 2>&1 || known=0
+  domain_only_state_is_enabled && global=strict
+  if [[ -f "$DOMAIN_ONLY_STATE" ]] && ! grep -qxE 'DOMAIN_ONLY=[01]' "$DOMAIN_ONLY_STATE"; then known=0; fi
+  for file in "$CONF_DIR"/*.conf; do
+    [[ -f "$file" ]] || continue
+    # Map-only helpers have no server and contribute no socket inventory.
+    if ! row="$(nx_conf_query health-inventory "$file" 2>/dev/null)"; then known=0; continue; fi
+    inventory+="$row"$'\n'
+  done
+  NX_HEALTH_INVENTORY="$inventory" python3 - "$selected" "$global" "$known" <<'PYPOLICY'
+import os, sys, json, socket, ssl, ipaddress, time, signal
+selected, inherited, known = sys.argv[1:]
+rows = [r for line in os.environ['NX_HEALTH_INVENTORY'].splitlines() for r in json.loads(line)]
+end = time.monotonic() + 12
+budget = 24
+def expired(*_):
+    print("  本机策略: 未验证（12秒总预算耗尽）", flush=True)
+    sys.exit(1)
+signal.signal(signal.SIGALRM, expired)
+signal.setitimer(signal.ITIMER_REAL, 12)
+bad = False
+unknown = False
+seen = set()
+def policy(row):
+    if row['uncertain']: return 'unknown'
+    if row['reject']: return 'reject'
+    p = inherited if row['policy'] in ('', 'inherit') else row['policy']
+    return p if p in ('strict', 'open') else 'unknown'
+def probe(host, port, tls, sni, header, version):
+    global budget
+    if budget <= 0 or time.monotonic() >= end: return 'budget'
+    budget -= 1
+    timeout = min(1.0, max(.05, end-time.monotonic()))
+    try:
+        conn = socket.create_connection((host, port), timeout=timeout)
+    except OSError: return 'connect-failed'
+    try:
+        with conn:
+            if tls:
+                ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+                ctx.check_hostname = False
+                ctx.verify_mode = ssl.CERT_NONE
+                try: conn = ctx.wrap_socket(conn, server_hostname=sni)
+                except ssl.SSLError as exc:
+                    return 'tls-reject' if 'ALERT' in str(exc) else 'tls-failed'
+            with conn:
+                conn.settimeout(timeout)
+                request = 'GET / HTTP/' + version + '\r\nConnection: close\r\n'
+                if header is not None: request += 'Host: ' + header + '\r\n'
+                conn.sendall((request+'\r\n').encode('ascii'))
+                data = conn.recv(1024)
+                if not data: return 'closed'
+                first = data.split(b'\r\n', 1)[0].split()
+                return first[1].decode('ascii') if len(first)>1 and first[0].startswith(b'HTTP/') else 'invalid-response'
+    except (OSError, UnicodeError): return 'io-failed'
+for row in rows:
+    if row['file'] != selected or not row['names']: continue
+    key = (row['socket'], row['tls'])
+    if key in seen: continue
+    seen.add(key)
+    host, port = row['socket'].rsplit(':', 1)
+    host = host.strip('[]')
+    host = {'0.0.0.0':'127.0.0.1', '::':'::1'}.get(host, host)
+    try: ipaddress.ip_address(host)
+    except ValueError: unknown=True; continue
+    name = row['names'][0]
+    if name == '_': continue
+    peers = [r for r in rows if r['socket'] == row['socket']]
+    defaults = [r for r in peers if r['default']]
+    default = policy(defaults[0]) if len(defaults)==1 else policy(peers[0]) if len(peers)==1 else 'unknown'
+    default_reject = default == 'reject'
+    own = policy(row)
+    # Other address-specific/wildcard sockets may win selection; don't guess.
+    if any(r['socket'].rsplit(':',1)[1] == port and r['socket'] != row['socket'] and
+           (':' in r['socket'].rsplit(':',1)[0]) == (':' in host) for r in rows): default='unknown'
+    trusted = known == '1' and not any(r['uncertain'] for r in peers)
+    if sum(r['file'] == selected and r['tls'] == row['tls'] for r in peers) > 1:
+        trusted = False  # one sample cannot certify other servers on this socket
+    cases = [('合法Host', name, name, '1.1', 'accept' if own in ('strict','open') else 'unknown'),
+             ('IP Host', name, ('['+host+']' if ':' in host else host), '1.1', 'reject' if own=='strict' and row['tls'] else ('reject' if default in ('strict','reject') else 'accept' if default=='open' else 'unknown')),
+             ('未知Host', name, 'nx-health-unknown.invalid', '1.1', 'reject' if own=='strict' and row['tls'] else ('reject' if default in ('strict','reject') else 'accept' if default=='open' else 'unknown')),
+             ('HTTP1.0无Host', name, None, '1.0', 'reject' if own=='strict' and row['tls'] else ('reject' if default in ('strict','reject') else 'accept' if default=='open' else 'unknown'))]
+    if row['tls']:
+        cases += [('未知SNI/合法Host', 'nx-health-unknown.invalid', name, '1.1', 'reject' if own=='strict' or default_reject else 'accept' if own=='open' and default in ('open','strict') else 'unknown'),
+                  ('无SNI/合法Host', None, name, '1.1', 'reject' if own=='strict' or default_reject else 'accept' if own=='open' and default in ('open','strict') else 'unknown')]
+    for label, sni, header, version, expected in cases:
+        result = probe(host, int(port), row['tls'], sni, header, version)
+        if not trusted: expected='unknown'
+        rejected = result in ('closed','tls-reject')
+        accepted = result.isdigit() and result not in ('400','421')
+        if expected == 'unknown' or result in ('400','421','budget'):
+            verdict='未验证（策略/协议/预算边界）'; unknown=True
+        elif expected == 'reject' and rejected or expected == 'accept' and accepted:
+            verdict='策略符合'
+        elif result in ('connect-failed','io-failed','tls-failed','invalid-response'):
+            verdict='未验证（连通性/握手失败）'; unknown=True
+        else: verdict='策略不符（需核对生效配置）'; bad=True
+        print('  本机策略 %s %s: %s | %s' % (row['socket'], label, result, verdict))
+if not seen:
+    print('  本机策略: 未验证（没有可识别 socket）'); unknown=True
+print('  策略探测只验证上述本机入口样本；HTTP业务状态和证书校验另列，不证明后端无暴露。')
+sys.exit(2 if bad else 1 if unknown else 0)
+PYPOLICY
+}
+
 health_check_conf_file() {
   local conf_file="$1"
   local domain listen_port mode upstream_url stream_upstream_url stream_upstream_urls
@@ -254,6 +363,7 @@ health_check_conf_file() {
   echo "  域名: ${domain}"
   echo "  入口: $(health_display_url "$target_url")"
   printf '%s\n' "$local_report"
+  health_socket_policy "$conf_file" || status_ok=2
   echo "  公网/CDN 协议: ${scheme^^} | HTTP: ${http_code} | 状态: ${status_label}"
   echo "  DNS: ${dns_ips}"
   [[ -n "$remote_ip" ]] && echo "  命中IP: ${remote_ip}"
@@ -315,9 +425,9 @@ site_health_menu() {
           fi
         done
         if (( bad == 0 )); then
-          info "检查完成：${total} 个站点全部正常。"
+          info "检查完成：${total} 个站点的已执行检查通过（不代表后端无暴露）。"
         else
-          warn "检查完成：${total} 个站点中有 ${bad} 个异常，请根据上面的 HTTP 状态码、DNS 和证书信息排查。"
+          warn "检查完成：${total} 个站点中有 ${bad} 个异常或未验证项，请分别核对连通性、业务响应和策略检查。"
           warn "最终效果仍请结合浏览器或客户端实际访问情况人工核查。"
         fi
         pause

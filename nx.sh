@@ -15,7 +15,7 @@ NC='\033[0m'
 
 # ---------- 全局变量 ----------
 APP_NAME="Nginx-X"
-APP_VERSION="3.4.1"
+APP_VERSION="3.4.2"
 # Alpine 的 nginx 把 server 配置放在 http.d，其他系统用 conf.d
 if [[ -f /etc/nginx/http.d ]] || [[ -d /etc/nginx/http.d ]]; then
   CONF_DIR="/etc/nginx/http.d"
@@ -2724,15 +2724,38 @@ banner() {
   echo "========================================"
 }
 
+# Fetch an explicit branch and prove ancestry before touching source or entry.
+nx_git_sync() {
+  local repo="$1" branch="$2" head target current upstream counts ahead behind dirty
+  if ! ${SUDO} git -C "$repo" fetch --no-tags origin "+refs/heads/$branch:refs/remotes/origin/$branch"; then
+    echo '[ERROR] fetch 失败；未安装，保留原源码和入口。' >&2; return 1
+  fi
+  head="$(${SUDO} git -C "$repo" rev-parse HEAD)" || return 1
+  target="$(${SUDO} git -C "$repo" rev-parse "refs/remotes/origin/$branch^{commit}")" || return 1
+  current="$(${SUDO} git -C "$repo" symbolic-ref --quiet --short HEAD)" || current=detached
+  upstream="$(${SUDO} git -C "$repo" rev-parse --abbrev-ref '@{upstream}' 2>/dev/null)" || upstream=none
+  dirty="$(${SUDO} git -C "$repo" status --porcelain --untracked-files=all)" || return 1
+  counts="$(${SUDO} git -C "$repo" rev-list --left-right --count "$head...$target")" || return 1
+  read -r ahead behind <<< "$counts"
+  if [[ -n "$dirty" || "$current" != "$branch" || "$upstream" != "origin/$branch" || "$ahead" != 0 ]]; then
+    printf '[ERROR] 源码同步拒绝：HEAD=%s target=%s ahead=%s behind=%s branch=%s upstream=%s dirty=%s\n' \
+      "$head" "$target" "$ahead" "$behind" "$current" "$upstream" "${dirty:+yes}" >&2
+    echo '可能存在本地提交/分叉/远端回退。请先备份并确认以上目标 SHA，再人工精确同步；不会自动 reset 或丢弃修改。' >&2
+    return 1
+  fi
+  if [[ "$head" != "$target" ]]; then
+    ${SUDO} git -C "$repo" merge --ff-only "$target" || return 1
+  fi
+  [[ "$(${SUDO} git -C "$repo" rev-parse HEAD)" == "$target" && -z "$(${SUDO} git -C "$repo" status --porcelain --untracked-files=all)" ]] || return 1
+  printf '[INFO] 源码已核对远端目标：%s\n' "$target"
+}
+
 # The worker contains only update functions/values, never the menu or a live
 # source path (the repository may change while it runs).
 nx_update_publish() {
   local work_dir="$1" target_bin="$2" source_repo="$3"
   if [[ -n "$work_dir" ]]; then
-    if ! ${SUDO} git -C "$work_dir" pull --ff-only origin "${REPO_BRANCH}"; then
-      error "拉取最新代码失败，请检查网络或手动更新。"
-      return 1
-    fi
+    nx_git_sync "$work_dir" "$REPO_BRANCH" || return 1
   elif [[ -e "$source_repo" || -L "$source_repo" ]]; then
     error "安装目录存在但不是 Git 仓库，已保留：$source_repo"
     return 1
@@ -2758,7 +2781,6 @@ nx_update_publish() {
   fi
 
   if [[ -n "$bin_md5_before" && "$bin_md5_before" == "$bin_md5_after" ]]; then
-    info "当前已是最新版本（${target_bin}）。"
     return 10
   fi
 
@@ -2790,7 +2812,7 @@ update_script() {
     umask 077
     printf '#!/usr/bin/env bash\nset -uo pipefail\ntrap "" INT HUP\n'
     printf 'GREEN=%q\nYELLOW=%q\nRED=%q\nBLUE=%q\nNC=%q\n' "$GREEN" "$YELLOW" "$RED" "$BLUE" "$NC"
-    declare -f nx_update_publish check_cmd info warn error note
+    declare -f nx_git_sync nx_update_publish check_cmd info warn error note
     printf 'SUDO=%q\nREPO_URL=%q\nREPO_BRANCH=%q\n' "${SUDO:+sudo -n}" "$REPO_URL" "$REPO_BRANCH"
     printf 'nx_update_publish %q %q %q\n' "$work_dir" "$target_bin" "$source_repo"
   ) | ${SUDO} tee "$job/worker.sh" >/dev/null || return 1
@@ -2865,7 +2887,7 @@ PYWORKER
   # HUP means the original tty/session must not be reused, even if isatty
   # temporarily still reports true. No EOF menu spinning after disconnect.
   if [[ "$hungup" == 1 ]]; then NX_UPDATE_HUP=1; return 129; fi
-  if [[ "$rc" == 10 ]]; then info "当前已是最新版本（${target_bin}）。"; return 0; fi
+  if [[ "$rc" == 10 ]]; then info "源码已核对远端；安装产物未变化（${target_bin}）。"; return 0; fi
   if [[ "$rc" != 0 ]]; then error "更新失败；旧入口保留。查看 ${SUDO:+sudo }cat $job/log 和 $job/status"; return "$rc"; fi
   info "脚本已更新到最新版本（${target_bin}）。"
   if [[ "${NX_IN_MENU:-0}" == 1 && -t 0 && -t 1 ]]; then

@@ -32,8 +32,14 @@ case "$1" in
   cp -R "$NX_ENTRY_REPO/." "$destination/"
   ;;
  -C)
-  [[ "$3 $4 $5 $6" == 'pull origin main --ff-only' ]]
-  printf 'pull\n' >> "$NX_ENTRY_LOG"
+  case "$3" in
+   fetch) printf 'pull\n' >> "$NX_ENTRY_LOG" ;;
+   symbolic-ref) echo main ;;
+   rev-list) echo '0 0' ;;
+   rev-parse) if [[ "$4" == --abbrev-ref ]]; then echo origin/main; else echo aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa; fi ;;
+   status) : ;;
+   *) exit 92 ;;
+  esac
   ;;
  *) exit 92 ;;
 esac

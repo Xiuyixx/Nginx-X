@@ -109,6 +109,32 @@ install_local() {
   fi
 }
 
+# Fetch an explicit branch and prove ancestry before touching source or entry.
+nx_git_sync() {
+  local repo="$1" branch="$2" head target current upstream counts ahead behind dirty
+  if ! ${SUDO} git -C "$repo" fetch --no-tags origin "+refs/heads/$branch:refs/remotes/origin/$branch"; then
+    echo '[ERROR] fetch 失败；未安装，保留原源码和入口。' >&2; return 1
+  fi
+  head="$(${SUDO} git -C "$repo" rev-parse HEAD)" || return 1
+  target="$(${SUDO} git -C "$repo" rev-parse "refs/remotes/origin/$branch^{commit}")" || return 1
+  current="$(${SUDO} git -C "$repo" symbolic-ref --quiet --short HEAD)" || current=detached
+  upstream="$(${SUDO} git -C "$repo" rev-parse --abbrev-ref '@{upstream}' 2>/dev/null)" || upstream=none
+  dirty="$(${SUDO} git -C "$repo" status --porcelain --untracked-files=all)" || return 1
+  counts="$(${SUDO} git -C "$repo" rev-list --left-right --count "$head...$target")" || return 1
+  read -r ahead behind <<< "$counts"
+  if [[ -n "$dirty" || "$current" != "$branch" || "$upstream" != "origin/$branch" || "$ahead" != 0 ]]; then
+    printf '[ERROR] 源码同步拒绝：HEAD=%s target=%s ahead=%s behind=%s branch=%s upstream=%s dirty=%s\n' \
+      "$head" "$target" "$ahead" "$behind" "$current" "$upstream" "${dirty:+yes}" >&2
+    echo '可能存在本地提交/分叉/远端回退。请先备份并确认以上目标 SHA，再人工精确同步；不会自动 reset 或丢弃修改。' >&2
+    return 1
+  fi
+  if [[ "$head" != "$target" ]]; then
+    ${SUDO} git -C "$repo" merge --ff-only "$target" || return 1
+  fi
+  [[ "$(${SUDO} git -C "$repo" rev-parse HEAD)" == "$target" && -z "$(${SUDO} git -C "$repo" status --porcelain --untracked-files=all)" ]] || return 1
+  printf '[INFO] 源码已核对远端目标：%s\n' "$target"
+}
+
 bootstrap_install() {
   echo "[INFO] 开始一键安装 Nginx-X..."
 
@@ -116,10 +142,7 @@ bootstrap_install() {
 
   if [[ -d "$INSTALL_DIR/.git" ]]; then
     echo "[INFO] 检测到已安装目录，正在更新..."
-    if ! ${SUDO} git -C "$INSTALL_DIR" pull origin "$REPO_BRANCH" --ff-only; then
-      echo "[ERROR] 拉取最新代码失败。"
-      exit 1
-    fi
+    nx_git_sync "$INSTALL_DIR" "$REPO_BRANCH" || return 1
   elif [[ -e "$INSTALL_DIR" || -L "$INSTALL_DIR" ]]; then
     echo "[ERROR] 目标目录已存在且不是 Git 仓库；保留原目录：$INSTALL_DIR"
     return 1

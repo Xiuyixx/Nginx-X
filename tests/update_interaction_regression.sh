@@ -21,7 +21,12 @@ cat > "$root/git" <<'GIT'
 #!/usr/bin/env bash
 case "$*" in
   *'remote get-url'*) printf '%s\n' 'https://github.com/Xiuyixx/Nginx-X.git' ;;
-  *'pull'*) : ;;
+  *'fetch'*|*'merge'*) : ;;
+  *'symbolic-ref'*) echo main ;;
+  *'rev-list'*) echo '0 0' ;;
+  *'--abbrev-ref'*) echo origin/main ;;
+  *'rev-parse'*) echo aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa ;;
+  *'status --porcelain'*) : ;;
   *) exit 1 ;;
 esac
 GIT

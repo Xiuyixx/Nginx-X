@@ -12,6 +12,7 @@ nginx_http2_syntax() { echo listen; }
 # shellcheck disable=SC2034
 SUDO=""
 TEST_ROOT="$(mktemp -d)"
+CONF_DIR="$TEST_ROOT"
 trap 'nx_test_cleanup; rm -rf "$TEST_ROOT"' EXIT
 SSL_DIR="$TEST_ROOT/ssl"
 mkdir -p "$SSL_DIR/example.com"

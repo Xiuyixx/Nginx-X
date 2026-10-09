@@ -473,21 +473,28 @@ PY
 }
 
 nx_https_apply() {
-  local operation="$1" domain="$2" conf_file="$3" requested="${4:-}" tmp rc=0
+  local operation="$1" domain="$2" conf_file="$3" requested="${4:-}" tmp stage rc=0
   [[ -f "$conf_file" ]] || { error "配置文件不存在：${conf_file}"; return 1; }
   if [[ "$operation" == enable ]] && ! conf_https_enabled "$conf_file" && [[ ! -f "${SSL_DIR}/${domain}/fullchain.pem" || ! -f "${SSL_DIR}/${domain}/privkey.pem" ]]; then
     error "未找到证书文件：${SSL_DIR}/${domain}/"
     return 1
   fi
-  tmp="$(mktemp /tmp/nginxx-https-preserve-XXXXXX)" || return 1
-  if nx_https_transform "$operation" "$conf_file" "$domain" "$SSL_DIR" "$requested" > "$tmp"; then
-    if ! cmp -s "$tmp" "$conf_file"; then
+  stage="$(mktemp -d /tmp/nginxx-https-preserve-XXXXXXXX)" || return 1
+  if ! nx_conf_snapshot "$conf_file" "$stage"; then rm -rf "$stage"; return 1; fi
+  # Consumed by nx_transaction through Bash dynamic scope.
+  # shellcheck disable=SC2034
+  local NX_CAS_SOURCE="$conf_file" NX_CAS_DIR="$stage"
+  tmp="$stage/candidate"
+  if nx_https_transform "$operation" "$stage/base" "$domain" "$SSL_DIR" "$requested" > "$tmp"; then
+    if ! cmp -s "$tmp" "$stage/base"; then
       apply_conf_preserved_with_rollback "$tmp" "$conf_file" || rc=$?
+    else
+      nx_conf_snapshot_verify "$conf_file" "$stage" || rc=$?
     fi
   else
     rc=$?
   fi
-  rm -f "$tmp"
+  rm -rf "$stage"
   if (( rc == 0 )); then
     info "HTTPS ${operation}：$(basename "$conf_file")（保留站点配置）"
   fi

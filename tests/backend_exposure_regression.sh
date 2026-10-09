@@ -12,6 +12,8 @@ for implementation in ./nx.sh "$T/bundle"; do
  (
   # shellcheck disable=SC1090
   source "$implementation"
+  # Independent real socket coverage lives in health_policy_nginx.sh.
+  health_socket_policy() { :; }
   cat > "$T/internal.conf" <<'SITE'
 # managed_by=Nginx-X
 # backend_port=8317

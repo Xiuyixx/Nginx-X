@@ -5,6 +5,8 @@ set -euo pipefail
 source "$(dirname "${BASH_SOURCE[0]}")/fixtures/test-environment.sh"
 cd "$(dirname "$0")/.."
 source ./nx.sh
+# Socket policy has independent real-daemon coverage. These mocks test rendering.
+health_socket_policy() { :; }
 T="$(mktemp -d)"
 trap 'nx_test_cleanup; rm -rf "$T"' EXIT
 cat > "$T/site.conf" <<'EOF'
@@ -48,6 +50,7 @@ for implementation in ./nx.sh "$T/bundle"; do
   (
     # shellcheck disable=SC1090 # test source and generated standalone bundle
     source "$implementation"
+    health_socket_policy() { :; }
     upstream='https://primaryuser:primarypassword@origin.example/path?token=primarytoken&other=othersecret#primaryfragment'
     stream_one='https://streamuser:streampassword@stream.example/live?auth=streamtoken'
     stream_two='https://encodeduser:encoded%70assword@[::1]:9443/live?token=secondtoken&token=duplicatetoken#streamfragment'

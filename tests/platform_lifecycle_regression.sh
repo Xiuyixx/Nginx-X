@@ -72,7 +72,16 @@ PATH="$root/other:$PATH" bash -c 'source "$1"; [[ "$(installed_script_target)" =
 mkdir -p "$root/source/.git"
 cat > "$root/mock/git" <<'MOCKGIT'
 #!/bin/sh
-case "$*" in *remote*) echo https://github.com/Xiuyixx/Nginx-X.git;; *pull*) exit 0;; *) exit 1;; esac
+case "$*" in
+ *'remote get-url'*) echo https://github.com/Xiuyixx/Nginx-X.git ;;
+ *pull*|*fetch*|*merge*) exit 0 ;;
+ *symbolic-ref*) echo main ;;
+ *rev-list*) echo '0 0' ;;
+ *--abbrev-ref*) echo origin/main ;;
+ *rev-parse*) echo aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa ;;
+ *'status --porcelain'*) : ;;
+ *) exit 1 ;;
+esac
 MOCKGIT
 cat > "$root/mock/sudo" <<'MOCKSUDO'
 #!/bin/sh

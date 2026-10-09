@@ -32,6 +32,9 @@ jobs:
       - name: ShellCheck source and installed bundle
         run: |
           shellcheck -x -S style nx.sh install.sh lib/*.sh tools/*.sh tests/*.sh
+          # Fixture fragments are sourced snippets; validate as bash explicitly.
+          for f in tests/fixtures/*.sh; do bash -n "$f"; done
+          shellcheck -s bash -S style tests/fixtures/*.sh
           shellcheck -S style /tmp/nx-bundle
 
       - name: Run regression tests

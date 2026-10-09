@@ -5,6 +5,8 @@ source "$(dirname "${BASH_SOURCE[0]}")/fixtures/test-environment.sh"
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # shellcheck disable=SC1091
 source "$ROOT/nx.sh"
+  # Independent real socket coverage lives in health_policy_nginx.sh.
+  health_socket_policy() { :; }
 T="$(mktemp -d)"
 trap 'nx_test_cleanup; rm -rf "$T"' EXIT
 CONF_DIR="$T/conf"; SSL_DIR="$T/ssl"; DOMAIN_ONLY_STATE="$T/state"

@@ -568,6 +568,51 @@ def inspect(filename, query=operation):
         servers = [n for n in nodes if n['args'] == ['server'] and n['children'] is not None]
         def directives(n, key): return [x for x in n['children'] if x['args'][0] == key]
         def unquote(s): return s[1:-1] if len(s)>1 and s[0] == s[-1] and s[0] in '\"\'' else s
+        if query == 'health-inventory':
+            import json
+            inventory = []
+            if any(n['args'] != ['server'] and n['args'][0] not in ('map', 'types') for n in nodes): fail('non-server diagnostic scope')
+            if any(n['args'][0] in ('include', 'server') for n in nodes if n['args'] != ['server']): fail('unknown helper')
+            for srv in servers:
+                names = [unquote(v) for n in directives(srv, 'server_name') for v in n['args'][1:]]
+                if any(not re.fullmatch(r'[A-Za-z0-9_.-]+', v) for v in names): fail('complex diagnostic names')
+                uncertain = any(n['args'][0] == 'include' for n in walk(srv['children']))
+                policy = metadata.get('access_policy', [(0, 0, 'inherit')])[0][2]
+                reject = any(n['args'] == ['return', '444'] for n in srv['children'])
+                for n in directives(srv, 'listen'):
+                    args = [unquote(v) for v in n['args'][1:]]
+                    if not args: fail('missing diagnostic listen address')
+                    inventory.append(dict(socket=socket(args[0]), tls='ssl' in args[1:],
+                        default='default_server' in args[1:], names=names, policy=policy,
+                        reject=reject, uncertain=uncertain, file=filename))
+            print(json.dumps(inventory))
+            return
+        if query == 'health-main':
+            # Only the exact configured conf glob is accounted for below. Any
+            # external include, implicit server or stream context is uncertain.
+            expected = params[0].rstrip('/') + '/*.conf'
+            http = [n for n in nodes if n['args'] == ['http']]
+            if len(http) != 1: fail('unknown main HTTP scope')
+            includes = [n for n in walk(nodes) if n['args'][0] == 'include']
+            managed = 0
+            for inc in includes:
+                values = [unquote(v) for v in inc['args']]
+                if values == ['include', expected] and inc in http[0]['children']:
+                    managed += 1
+                    continue
+                # Standard mime.types and map helpers are harmless only after
+                # parsing their contents; never trust a filename alone.
+                if len(values) != 2 or not os.path.isabs(values[1]): fail('relative/unknown include')
+                import glob
+                for helper in glob.glob(values[1]):
+                    helper_nodes = inspect(helper, 'tree')
+                    if not helper_nodes or any(n['args'][0] not in ('types', 'map') for n in helper_nodes):
+                        fail('external server/routing include')
+                    if any(n['args'][0] == 'include' for n in walk(helper_nodes)): fail('nested helper include')
+            if managed != 1: fail('missing/duplicate managed include')
+            if any(n['args'] == ['server'] for n in walk(nodes)): fail('inline server outside managed inventory')
+            print('known')
+            return
         if query in ('home-set', 'home-sync', 'home-strip', 'home-status'):
             # Source offsets and parsed nodes establish ownership; marker-shaped
             # strings/comments in other scopes never grant permission to erase.
@@ -653,6 +698,49 @@ def inspect(filename, query=operation):
                     for n in walk(children):
                         if n['args'][0] in ('include', 'rewrite', 'error_page'):
                             fail('complex includes/rewrites are unsupported for homepage mapping')
+                    # Follow the missing-file branch of each reachable try_files.
+                    # Do not guess regex/nested/dynamic routing or filesystem state.
+                    locations = [n for n in children if n['args'][0] == 'location']
+                    def resolve_home(uri):
+                        if uri == '/': fail('homepage fallback returns to mapped root')
+                        exact, prefixes, named = [], [], []
+                        for loc in locations:
+                            args = [unquote(x) for x in loc['args'][1:]]
+                            if loc['children'] is None or any(x['args'][0] == 'location' for x in walk(loc['children'])):
+                                fail('nested homepage routing is unsupported')
+                            if len(args) == 1 and args[0].startswith('@'):
+                                if args[0] == uri: named.append(loc)
+                            elif len(args) == 2 and args[0] == '=':
+                                if args[1] == uri: exact.append(loc)
+                            elif len(args) == 1 and args[0].startswith('/'):
+                                if uri.startswith(args[0]): prefixes.append((len(args[0]), loc))
+                            elif len(args) == 2 and args[0] == '^~':
+                                if uri.startswith(args[1]): prefixes.append((len(args[1]), loc))
+                            else: fail('regex/complex homepage locations are unsupported')
+                        matches = named if uri.startswith('@') else exact
+                        if not matches and prefixes and not uri.startswith('@'):
+                            longest = max(length for length, _ in prefixes)
+                            matches = [loc for length, loc in prefixes if length == longest]
+                        if len(matches) != 1: fail('ambiguous homepage fallback location')
+                        return matches[0]
+                    visited = set()
+                    uri = target
+                    while True:
+                        loc = resolve_home(uri)
+                        if loc['start'] in visited: fail('homepage try_files fallback cycle')
+                        visited.add(loc['start'])
+                        if any(n['children'] is not None for n in loc['children']):
+                            fail('complex reachable homepage routing is unsupported')
+                        tries = directives(loc, 'try_files') or directives(srv, 'try_files')
+                        if len(tries) > 1: fail('ambiguous homepage try_files')
+                        if not tries: break
+                        args = [unquote(x) for x in tries[0]['args'][1:]]
+                        if len(args) < 2: fail('invalid homepage try_files')
+                        fallback = args[-1]
+                        if re.fullmatch(r'=[245][0-9]{2}', fallback): break
+                        if not re.fullmatch(r'(?:/[A-Za-z0-9_./-]*|@[A-Za-z0-9_-]+)', fallback):
+                            fail('dynamic homepage fallback is unsupported')
+                        uri = fallback
                     apps.append(srv)
                 if len(apps) != 1: fail('expected exactly one business server')
                 if (target == old and len(owned) == 1 and owned_servers == apps):

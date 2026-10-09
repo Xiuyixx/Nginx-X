@@ -20,8 +20,13 @@ PY
 cat > "$root/bin/git" <<'MOCK'
 #!/usr/bin/env bash
 case "$*" in
- *remote*) echo https://github.com/Xiuyixx/Nginx-X.git ;;
- *pull*) exit 0 ;;
+ *'remote get-url'*) echo https://github.com/Xiuyixx/Nginx-X.git ;;
+ *pull*|*fetch*|*merge*) exit 0 ;;
+ *symbolic-ref*) echo main ;;
+ *rev-list*) echo '0 0' ;;
+ *--abbrev-ref*) echo origin/main ;;
+ *rev-parse*) echo aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa ;;
+ *'status --porcelain'*) : ;;
  *) exit 1 ;;
 esac
 MOCK

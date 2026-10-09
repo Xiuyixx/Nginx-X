@@ -17,6 +17,11 @@ nx_transaction() (
   # Existing inode aliases outside the snapshot cannot be restored by a
   # directory rollback. Reject them before any migration/callback can write.
   nx_transaction_paths_safe || return 1
+  # Compare before snapshots, migration or any protection state publication.
+  if [[ -n ${NX_CAS_SOURCE:-} ]] && ! nx_conf_snapshot_matches "$NX_CAS_SOURCE" "$NX_CAS_DIR"; then
+    error "配置编辑冲突：源文件已更改、删除或改名；未发布任何配置。"
+    return 1
+  fi
 
   local snapshot rc=0 state_existed=0 main_existed=0 main_target=""
   local NX_BACKEND_MUTABLE_PATH=""
@@ -226,19 +231,58 @@ delete_conf() {
   info "已删除：${file}"
 }
 
+# A short shared lock captures both inode attributes and bytes consistently.
+# Private directory prevents editor-created replacement symlinks escaping /tmp.
+nx_conf_snapshot() (
+  local source="$1" dir="$2" fd
+  nx_conf_path_allowed "$source" && [[ -f "$source" ]] || return 1
+  exec {fd}<"$CONF_DIR" || return 1
+  flock -s "$fd" || return 1
+  nx_conf_path_allowed "$source" && [[ -f "$source" ]] || return 1
+  ${SUDO} stat -c '%d:%i:%u:%g:%a:%s:%y:%z' -- "$source" > "$dir/identity" || return 1
+  ${SUDO} cat -- "$source" > "$dir/base" || return 1
+  chmod 600 "$dir/base" "$dir/identity"
+)
+
+# No-op transformations still validate their snapshot, without reload/migration.
+nx_conf_snapshot_verify() (
+  local fd
+  exec {fd}<"$CONF_DIR" || return 1
+  flock -s "$fd" || return 1
+  nx_conf_snapshot_matches "$1" "$2" || {
+    error "配置编辑冲突：源文件已更改；未发布任何配置。"; return 1;
+  }
+)
+
+nx_conf_snapshot_matches() {
+  local identity
+  nx_conf_path_allowed "$1" && [[ -f "$1" ]] || return 1
+  identity="$(${SUDO} stat -c '%d:%i:%u:%g:%a:%s:%y:%z' -- "$1")" || return 1
+  [[ "$identity" == "$(cat "$2/identity")" ]] && ${SUDO} cmp -s "$1" "$2/base"
+}
+
 edit_conf_manual() {
-  local file="${1:-}" tmp
-  [[ -n "$file" && -f "$CONF_DIR/$file" ]] || return 1
-  tmp="$(mktemp /tmp/nginxx-edit-XXXXXX)" || return 1
-  if ! ${SUDO} cp "$CONF_DIR/$file" "$tmp" || ! run_editor "$tmp"; then
-    rm -f "$tmp"
+  local file="${1:-}" dir tmp editor_rc=0
+  [[ -n "$file" ]] || return 1
+  dir="$(mktemp -d /tmp/nginxx-edit-XXXXXXXX)" || return 1
+  chmod 700 "$dir" || return 1
+  tmp="$dir/edit.conf"
+  if ! nx_conf_snapshot "$CONF_DIR/$file" "$dir" || ! cp "$dir/base" "$tmp"; then
+    rm -rf "$dir"; return 1
+  fi
+  run_editor "$tmp" || editor_rc=$?
+  if [[ ! -f "$tmp" || -L "$tmp" ]] || ! nx_assert_single_link "$tmp" || ! chmod 600 "$tmp"; then
+    error "编辑器产生不安全文件；未发布配置：$dir"; return 1
+  fi
+  if (( editor_rc )); then
+    error "编辑未完成；编辑副本保留：$tmp"; return 1
+  fi
+  local NX_CAS_SOURCE="$CONF_DIR/$file" NX_CAS_DIR="$dir"
+  if ! mark_conf_manual_edited "$tmp" || ! chmod 600 "$tmp" || ! apply_conf_with_rollback "$tmp" "$CONF_DIR/$file" "$CONF_DIR/$file"; then
+    error "编辑副本保留：$tmp"
     return 1
   fi
-  if ! mark_conf_manual_edited "$tmp" || ! apply_conf_with_rollback "$tmp" "$CONF_DIR/$file" "$CONF_DIR/$file"; then
-    rm -f "$tmp"
-    return 1
-  fi
-  rm -f "$tmp"
+  rm -rf "$dir"
   info "配置已编辑并生效：${file}"
 }
 
