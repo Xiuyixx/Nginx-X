@@ -566,6 +566,50 @@ enable_acme_cron() {
   ensure_acme_cron
 }
 
+# Renewal scheduling belongs to the current ACME account, not just the
+# certificate selected in the list.  Keep the account-wide scope explicit and
+# do not turn this into a toggle: selecting enable again must still reconcile
+# a drifted/missing dispatcher or scheduler entry.
+nx_acme_renewal_menu() {
+  local c status
+  status="$(nx_acme_renewal_status)"
+  echo "当前 ACME 账户全部证书的自动续期：${status}"
+  echo '1) 开启账户级自动续期'
+  echo '2) 关闭账户级自动续期'
+  echo '0) 返回'
+  echo '说明：此设置影响当前 ACME 账户下的全部证书，不只当前选中的证书。'
+  read -rp '请选择: ' c || return 10
+  case "$c" in
+    1) confirm '确认开启当前 ACME 账户全部证书的自动续期？' || return 10
+       enable_acme_cron ;;
+    2) confirm '确认关闭当前 ACME 账户全部证书的自动续期？' || return 10
+       disable_acme_cron ;;
+    0) return 10 ;;
+    *) warn '无效输入。'; return 1 ;;
+  esac
+}
+
+# A scheduler read failure is distinct from an absent owned task; do not
+# present unknown state as disabled. This is read-only and preserves the
+# existing ownership whitelist used by has_acme_cron_task/disable_acme_cron.
+nx_acme_renewal_status() {
+  local current script unknown=0
+  local -a scheduler=(crontab)
+  nx_acme_privileged_paths
+  [[ -z "$SUDO" ]] || scheduler=("$SUDO" crontab)
+  if current="$(nx_acme_read_crontab "${scheduler[@]}" 2>/dev/null)"; then
+    if grep -Fxq "0 3 * * * $NX_ACME_DISPATCH cron" <<< "$current"; then echo '已开启'; return; fi
+  else unknown=1; fi
+  if current="$(nx_acme_read_crontab nx_acme_account_crontab 2>/dev/null)"; then
+    if nx_acme_cron_filter probe <<< "$current"; then echo '已开启'; return; fi
+  else unknown=1; fi
+  for script in "${NX_PERIODIC_DIR:-/etc/periodic}"/{daily,monthly}/acme-renew; do
+    if [[ -e "$script" && ! -r "$script" ]]; then unknown=1; continue; fi
+    if nx_acme_periodic_owned "$script"; then echo '已开启'; return; fi
+  done
+  if (( unknown )); then echo '未知（无法读取续期调度）'; else echo '已关闭（未检测到受管续期任务）'; fi
+}
+
 set_acme_email() {
   local email
   read -rp "请输入证书通知邮箱: " email || return 10
@@ -782,7 +826,7 @@ cert_list_action_menu() {
     clear
     echo "====== 证书操作：${domain} ======"
     echo "1) 重新申请"
-    echo "2) 启停当前 ACME 账户全部证书的续期"
+    echo "2) 管理当前 ACME 账户全部证书的续期"
     echo "3) 删除证书"
     echo "0) 返回上一级"
     echo "============================="
@@ -802,23 +846,7 @@ cert_list_action_menu() {
         pause
         return 0
         ;;
-      2)
-        if has_acme_cron_task; then
-          if confirm "当前 ACME 账户全部证书的续期已开启，是否全部关闭？"; then
-            run_menu_action disable_acme_cron
-          else
-            return 0
-          fi
-        else
-          if confirm "当前 ACME 账户全部证书的续期未开启，是否全部开启？"; then
-            run_menu_action enable_acme_cron
-          else
-            return 0
-          fi
-        fi
-        pause
-        return 0
-        ;;
+      2) run_menu_action_paused nx_acme_renewal_menu ;;
       3)
         # Match the locked deletion check: active includes and structured TLS
         # directives, not comments or unreferenced disabled/backup files.
@@ -870,11 +898,7 @@ cert_list_menu() {
   while true; do
     clear
     echo "========== 证书列表 =========="
-    if has_acme_cron_task; then
-      renew_status="已开启"
-    else
-      renew_status="未开启"
-    fi
+    renew_status="$(nx_acme_renewal_status)"
 
     for i in "${!certs[@]}"; do
       echo "$((i+1))) ${certs[$i]}  [账户级续期: ${renew_status}]"

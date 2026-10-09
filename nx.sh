@@ -15,7 +15,7 @@ NC='\033[0m'
 
 # ---------- 全局变量 ----------
 APP_NAME="Nginx-X"
-APP_VERSION="3.4.5"
+APP_VERSION="3.4.6"
 # Alpine 的 nginx 把 server 配置放在 http.d，其他系统用 conf.d
 if [[ -f /etc/nginx/http.d ]] || [[ -d /etc/nginx/http.d ]]; then
   CONF_DIR="/etc/nginx/http.d"
@@ -2354,17 +2354,7 @@ enable_https_from_config_list() {
   note "已选择配置：$(basename "$conf_file")"
 
   if conf_https_enabled "$conf_file"; then
-    warn "当前配置已启用 HTTPS：$(basename "$conf_file")"
-    if confirm "是否停用 HTTPS？"; then
-      if disable_https_for_conf_file "$domain" "$conf_file"; then
-        info "操作完成：HTTPS 已停用。"
-      else
-        error "操作失败：停用 HTTPS 未成功。请检查 nginx -t 输出。"
-      fi
-    else
-      info "已取消停用 HTTPS。"
-      return 10
-    fi
+    info "当前配置已启用 HTTPS，无需重复操作：$(basename "$conf_file")"
     return 0
   fi
 

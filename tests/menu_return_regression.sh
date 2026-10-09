@@ -61,7 +61,7 @@ ACME
  enable_acme_cron() { error 'fixture renewal failure'; return 1; }
  nx_acme_assert_unreferenced() { :; }
  nx_delete_certificate() { error 'fixture delete failure'; return 1; }
- cert_list_action_menu example.com <<< $'2\ny\n' > "$root/out"
+ cert_list_action_menu example.com <<< $'2\n1\ny\n\n0' > "$root/out"
  [[ $(grep -c '^PAUSE$' "$root/out") == 1 ]]
  grep -q '操作未完成' "$root/out"
  cert_list_action_menu example.com <<< $'3\ny\n' > "$root/out"
