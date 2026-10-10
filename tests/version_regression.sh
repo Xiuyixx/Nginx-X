@@ -24,8 +24,11 @@ done
 cmp "$root/nx.sh.title" "$root/nx-bundle.title"
 version="$(head -n 1 "$root/nx.sh.title")"
 version="${version#Nginx-X v}"
-grep -Fq "当前版本：**${version}**" README.md
-grep -Fq "菜单标题为 \`Nginx-X v${version}\`" README.md
+grep -Fq "version-${version}-blue" README.md
+if grep -Eq "当前版本：|菜单标题为|版本号随项目功能变更维护" README.md; then
+  echo "obsolete README version-maintenance paragraph returned" >&2
+  exit 1
+fi
 current_changelog="$(sed -n '/^## \[/ { p; q; }' CHANGELOG.md)"
 [[ "$current_changelog" == "## [${version}] - "* ]]
 echo "ok: source/bundle title Nginx-X v${version}, numeric semver and matching docs"
