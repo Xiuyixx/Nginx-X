@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# shellcheck disable=SC2317 # mocks invoked indirectly by dynamically sourced delete_conf
 # Explicit preflight retains the documented protected-site lifecycle veto.
 set -euo pipefail
 # shellcheck source=tests/fixtures/test-environment.sh
