@@ -28,7 +28,8 @@ build_proxy_conf() {
   local proxy_mode="${5:-normal}" stream_block=""
   case "$proxy_mode" in
     normal) ;;
-    streaming) stream_block=$'        proxy_buffering off;\n        proxy_cache off;' ;;
+    # AI history/images may exceed Nginx's default 1 MiB; keep a finite cap.
+    streaming) stream_block=$'        client_max_body_size 64m;\n        proxy_buffering off;\n        proxy_cache off;' ;;
     *) error "未知内部反代模式：$proxy_mode"; return 1 ;;
   esac
 
@@ -149,7 +150,7 @@ EOF
 
   case "$external_mode" in
     streaming)
-      main_stream_block=$'        proxy_buffering off;\n        proxy_cache off;'
+      main_stream_block=$'        client_max_body_size 64m;\n        proxy_buffering off;\n        proxy_cache off;'
       ;;
     media)
       main_stream_block=$(cat <<'BLOCK'

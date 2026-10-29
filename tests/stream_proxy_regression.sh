@@ -18,11 +18,14 @@ reload_nginx_safe() {
 assert_stream() {
  [[ "$(grep -c 'proxy_buffering off;' "$1")" == 1 ]]
  [[ "$(grep -c 'proxy_cache off;' "$1")" == 1 ]]
+ [[ "$(grep -c 'client_max_body_size 64m;' "$1")" == 1 ]]
  python3 - "$1" <<'PY'
 import sys
 s=open(sys.argv[1]).read()
 assert s.index('location / {') < s.index('proxy_buffering off;')
-assert not any(x in s for x in ['proxy_request_buffering','client_max_body_size'])
+assert s.index('location / {') < s.index('client_max_body_size 64m;')
+assert 'proxy_request_buffering' not in s
+assert 'client_max_body_size 0;' not in s
 PY
 }
 # Exercise the real selector: scoped display, defaults, aliases and invalid input.
@@ -80,6 +83,17 @@ for kind in internal external; do
  assert_stream "$conf"
  [[ "$(conf_meta_get "$conf" "$field")" == streaming ]]
  [[ "$(wc -l < "$root/reloads")" == 1 ]]
+ # Updating the script alone must not mutate existing streaming sites. Saving
+ # the same mode upgrades the old template through the existing transaction.
+ sed -i '/client_max_body_size 64m;/d' "$conf"
+ cp "$conf" "$root/legacy"
+ FAIL_RELOAD=1 run_menu_action modify_conf "${conf##*/}" <<< $'\n\n\n' > "$root/output" 2>&1
+ cmp "$conf" "$root/legacy"
+ grep -q '操作未完成' "$root/output"
+ modify_conf "${conf##*/}" <<< $'\n\n\n' > "$root/output" 2>&1
+ assert_stream "$conf"
+ # The failed transaction includes a best-effort reload of the restored config.
+ : > "$root/reloads"
  # Real editor: blank selection retains mode; backend/port changes remain atomic.
  if [[ "$kind" == internal ]]; then
   modify_conf "${conf##*/}" <<< $'\n18081\n3001\n' > "$root/output" 2>&1
@@ -89,7 +103,7 @@ for kind in internal external; do
  conf="$CONF_DIR/example.com-18081.conf"
  assert_stream "$conf"
  [[ "$(conf_meta_get "$conf" "$field")" == streaming ]]
- [[ "$(wc -l < "$root/reloads")" == 2 ]]
+ [[ "$(wc -l < "$root/reloads")" == 1 ]]
  mkdir -p "$SSL_DIR/example.com"
  openssl req -x509 -newkey rsa:2048 -nodes -days 1 -subj /CN=example.com -addext subjectAltName=DNS:example.com \
   -keyout "$SSL_DIR/example.com/privkey.pem" -out "$SSL_DIR/example.com/fullchain.pem" >/dev/null 2>&1
@@ -109,7 +123,7 @@ for kind in internal external; do
  grep -q '操作未完成' "$root/output"
  modify_conf "${conf##*/}" <<< $'\n\n\n1' > "$root/output" 2>&1
  conf="$(find "$CONF_DIR" -name 'example.com-*.conf.bak' -print)"
- if grep -q 'proxy_buffering off;\|proxy_cache off;' "$conf"; then exit 1; fi
+ if grep -q 'proxy_buffering off;\|proxy_cache off;\|client_max_body_size' "$conf"; then exit 1; fi
  [[ "$(conf_meta_get "$conf" "$field")" == normal ]]
  if [[ "$kind" == internal ]]; then selection=2; else selection=6; fi
  modify_conf "${conf##*/}" <<< $'\n\n\n'"$selection" > "$root/output" 2>&1
