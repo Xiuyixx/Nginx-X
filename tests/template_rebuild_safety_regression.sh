@@ -116,7 +116,9 @@ PY
    enable_https_for_conf_file example.com "$site" 18443 > "$root/menu" 2>&1
    conf_safe_for_template_rebuild "$site"
    modify_conf "${site##*/}" <<< $'\n\n\n\n\n\n\n' > "$root/menu" 2>&1
-   site="$CONF_DIR/example.com-18443.conf"
+   # HTTPS conversion keeps the source filename; the actual TLS listener is
+   # represented by metadata/config content rather than a filename rename.
+   site="$CONF_DIR/example.com-18080.conf"
    conf_safe_for_template_rebuild "$site"
    disable_https_for_conf_file example.com "$site" > "$root/menu" 2>&1
    conf_safe_for_template_rebuild "$site"
@@ -180,7 +182,8 @@ PY
  enable_https_for_conf_file example.com "$site" 18443 > "$root/menu" 2>&1
  conf_safe_for_template_rebuild "$site"
  modify_conf "${site##*/}" <<< $'\n\n3002\n' > "$root/menu" 2>&1
- site="$CONF_DIR/example.com-18443.conf"
+ # Re-saving an HTTPS site keeps its historical source filename.
+ site="$CONF_DIR/example.com-18080.conf"
  grep -q 'proxy_pass http://127.0.0.1:3002;' "$site"
  # Custom certificate path/protocol are preserved by the TLS rebuild helper.
  mkdir -p "$root/custom cert"

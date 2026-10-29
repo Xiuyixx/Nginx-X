@@ -532,6 +532,14 @@ def inspect(filename, query=operation):
             if query == 'metadata-set' and params and params[0] == key: continue
             if len(metadata.get(key, [])) > 1: fail('duplicate metadata: ' + key)
         if query in ('metadata-set', 'metadata-drop', 'strip-access', 'policy-batch'):
+            # Re-applying an identical singleton metadata value must be a true
+            # no-op.  Repositioning the same comment would change protected
+            # site bytes and make backend protection report a false drift.
+            if (query == 'metadata-set' and len(params) == 2 and
+                    len(metadata.get(params[0], [])) == 1 and
+                    metadata[params[0]][0][2] == params[1]):
+                sys.stdout.write(text)
+                return
             edits = []
             if query in ('strip-access', 'policy-batch'):
                 begin = None

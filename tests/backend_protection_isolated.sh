@@ -317,6 +317,51 @@ done
 confirm() { return 0; }
 echo 'PASS: protected homepage source/bundle fingerprint updates, unchanged live nft and reload rollback'
 
+# Real wizard regression: historical filenames survive HTTPS toggles. Saving
+# the same domain/TLS port must remain in place while the manifest and live
+# firewall continue referring to that original path (source and bundle).
+for implementation in /work/nx.sh /tmp/nx-bundle; do
+  source "$implementation"
+  eval "$isolated_reload"
+  confirm() { return 0; }
+  nx_home_set "$site" /management.html
+  enable_https_for_conf_file proof.example "$site" 18443
+  # Model the pre-3.4.13 streaming template, via a legitimate in-place commit.
+  sed '/client_max_body_size 64m;/d' "$site" >/tmp/legacy-wizard
+  apply_conf_with_rollback /tmp/legacy-wizard "$site" "$site"
+  cp "$site" /tmp/wizard-before.conf
+  cp /var/lib/nginxx/backend-protection/manifest.json /tmp/wizard-before.manifest
+  nft -s list ruleset >/tmp/wizard-before.rules
+  old_reload="$(declare -f reload_nginx_safe)"
+  reload_nginx_safe() { [[ -e /tmp/wizard-reload-failed ]] && { rm /tmp/wizard-reload-failed; eval "$old_reload"; reload_nginx_safe; return; }; touch /tmp/wizard-reload-failed; return 1; }
+  refuse modify_conf "${site##*/}" <<< $'\n\n\n2\n'
+  eval "$old_reload"
+  cmp "$site" /tmp/wizard-before.conf
+  cmp /var/lib/nginxx/backend-protection/manifest.json /tmp/wizard-before.manifest
+  modify_conf "${site##*/}" <<< $'\n\n\n2\n'
+  [[ -f "$site" && ! -e "$CONF_DIR/proof.example-18443.conf" ]]
+  grep -q 'client_max_body_size 64m;' "$site"
+  [[ "$(nx_home_status "$site")" == /management.html ]]
+  [[ "$(nx_access_site_policy "$site")" == strict ]]
+  nx_backend_status "$site"
+  https_ok
+  blocked http://192.0.2.1:18317
+  blocked 'http://[2001:db8:1::1]:18317'
+  nft -s list ruleset >/tmp/wizard-after.rules
+  cmp /tmp/wizard-before.rules /tmp/wizard-after.rules
+  # A real backend change and an explicit port rename remain unauthorized.
+  cp "$site" /tmp/wizard-before.conf
+  cp /var/lib/nginxx/backend-protection/manifest.json /tmp/wizard-before.manifest
+  refuse modify_conf "${site##*/}" <<< $'\n\n18318\n2\n'
+  refuse modify_conf "${site##*/}" <<< $'\n18444\n\n2\n'
+  cmp "$site" /tmp/wizard-before.conf
+  cmp /var/lib/nginxx/backend-protection/manifest.json /tmp/wizard-before.manifest
+  [[ ! -e "$CONF_DIR/proof.example-18444.conf" ]]
+  disable_https_for_conf_file proof.example "$site"
+  nx_home_set "$site" ''
+  local_ok
+done
+echo 'PASS: protected source/bundle HTTPS wizard resave keeps identity, upgrades stream cap, preserves homepage/live nft, rolls back fingerprint and vetoes backend/rename changes'
 nft -s list ruleset >/tmp/enabled.rules
 nx_site_access_menu "$site" <<< 1
 nft -s list ruleset >/tmp/repeated.rules

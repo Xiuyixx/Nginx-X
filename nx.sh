@@ -15,7 +15,7 @@ NC='\033[0m'
 
 # ---------- 全局变量 ----------
 APP_NAME="Nginx-X"
-APP_VERSION="3.4.15"
+APP_VERSION="3.4.16"
 # Alpine 的 nginx 把 server 配置放在 http.d，其他系统用 conf.d
 if [[ -f /etc/nginx/http.d ]] || [[ -d /etc/nginx/http.d ]]; then
   CONF_DIR="/etc/nginx/http.d"
@@ -1840,8 +1840,18 @@ nx_modify_conf_from_snapshot() {
   trap 'rm -f "${tmp:-}"' RETURN
   build_proxy_conf "$new_domain" "$new_listen" "$new_backend" "$tmp" "$new_mode" || return 1
   nx_preserve_modify_tls "$base" "$tmp" "$new_domain" "$new_listen" || return 1
-  new_target="$(conf_target_path "$new_domain" "$new_listen")"
-  [[ "$src" == *.conf.bak ]] && new_target="${new_target}.bak"
+  # HTTPS keeps the managed file's historical HTTP filename (for example,
+  # x17.xyz-80.conf now containing listen 443).  Re-saving unchanged identity
+  # must update that file in place: renaming it would make backend protection
+  # see the protected path as deleted and reject the transaction.  A real
+  # domain/port change still receives its canonical target and preserves the
+  # enabled/disabled suffix.
+  if [[ "$new_domain" == "$current_domain" && "$new_listen" == "$current_listen" ]]; then
+    new_target="$src"
+  else
+    new_target="$(conf_target_path "$new_domain" "$new_listen")"
+    [[ "$src" == *.conf.bak ]] && new_target="${new_target}.bak"
+  fi
   apply_conf_with_rollback "$tmp" "$new_target" "$src" || return 1
   info "配置已修改，保留原协议与启停状态。"
   rm -f "$tmp"
@@ -1950,8 +1960,12 @@ nx_modify_external_from_snapshot() {
     new_referer_url=""
   fi
 
-  new_target="$(conf_target_path "$new_domain" "$new_listen")"
-  (( was_disabled == 0 )) || new_target="${new_target}.bak"
+  if [[ "$new_domain" == "$current_domain" && "$new_listen" == "$current_listen" ]]; then
+    new_target="$src"
+  else
+    new_target="$(conf_target_path "$new_domain" "$new_listen")"
+    (( was_disabled == 0 )) || new_target="${new_target}.bak"
+  fi
   tmp="$(mktemp /tmp/nginxx-external-mod-XXXXXX)" || return 1
   trap 'rm -f "${tmp:-}"' RETURN
   build_external_proxy_conf "$new_domain" "$new_listen" "$new_upstream_url" "$new_mode" "$tmp" "0" "$new_stream_upstream_url" "$new_source_site_url" "$new_referer_url" "$new_stream_upstream_urls" || return 1
