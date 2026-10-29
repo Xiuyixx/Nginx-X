@@ -6,6 +6,20 @@ source "$(dirname "${BASH_SOURCE[0]}")/fixtures/test-environment.sh"
 cd "$(dirname "$0")/.."
 root="$NX_TEST_ENV_ROOT"
 repo="$PWD"
+template_test_cleanup() {
+ local rc=$?
+ if (( rc != 0 )); then
+   echo "FAIL template safety: entry=${entry:-setup} mode=${mode:-setup}" >&2
+   for log in "$root/menu" "$root/refusal" "$root/nginx-test.log"; do
+     [[ -f "$log" ]] || continue
+     echo "--- ${log##*/} ---" >&2
+     tail -60 "$log" >&2
+   done
+ fi
+ nx_test_cleanup
+ return "$rc"
+}
+trap template_test_cleanup EXIT
 bash tools/build-bundle.sh "$root/bundle"
 nginx_bin="${NGINX_TEST_BIN:-$(command -v nginx || true)}"
 [[ -x "$nginx_bin" ]] || { echo 'SKIP: real nginx unavailable'; exit 0; }
@@ -36,7 +50,33 @@ for entry in "$repo/nx.sh" "$root/bundle"; do
  ipv6_available() { return 1; }
  is_port_used_os() { return 1; }
  reload_nginx_safe() {
-   "$nginx_bin" -t -p "$root/" -c "$NGINX_MAIN_CONF" > "$root/nginx-test.log" 2>&1 || { cat "$root/nginx-test.log"; return 1; }
+   local check_conf="$NGINX_MAIN_CONF" check_dir source target
+   if [[ ${EUID:-$(id -u)} != 0 ]]; then
+     # nginx -t binds listeners on these runners. Validate an identical copy
+     # with only the generated port-80 redirect remapped to an unprivileged
+     # port; the production fixture remains unchanged for all assertions.
+     check_dir="$root/nginx-check-conf"
+     rm -rf "$check_dir" || return 1
+     mkdir -p "$check_dir" || return 1
+     for source in "$CONF_DIR"/*.conf; do
+       [[ -f "$source" ]] || continue
+       target="$check_dir/$(basename "$source")"
+       sed -E \
+         -e 's/^([[:space:]]*listen[[:space:]]+)\[::\]:80([[:space:];].*)$/\1[::]:18000\2/' \
+         -e 's/^([[:space:]]*listen[[:space:]]+)80([[:space:];].*)$/\118000\2/' \
+         "$source" > "$target" || return 1
+     done
+     check_conf="$root/nginx-check.conf"
+     cp "$NGINX_MAIN_CONF" "$check_conf" || return 1
+     python3 - "$check_conf" "$CONF_DIR" "$check_dir" <<'PY' || return 1
+import pathlib, sys
+path, source, target = map(pathlib.Path, sys.argv[1:])
+text = path.read_text()
+text = text.replace(f'include {source}/*.conf;', f'include {target}/*.conf;')
+path.write_text(text)
+PY
+   fi
+   "$nginx_bin" -t -p "$root/" -c "$check_conf" > "$root/nginx-test.log" 2>&1 || { cat "$root/nginx-test.log"; return 1; }
    echo reload >> "$root/reloads"
  }
  site="$CONF_DIR/example.com-18080.conf"
