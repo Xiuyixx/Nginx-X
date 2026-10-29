@@ -112,6 +112,20 @@ nx_install_repository() (
     nx_repo_publish "$work/key.ready" "$key" && nx_repo_publish "$work/source.ready" "$source" || return 1
     if [[ "$pkg" == apt ]]; then
       local -a opts=(-o "Dir::Etc::sourcelist=$source" -o 'Dir::Etc::sourceparts=-' -o 'APT::Get::List-Cleanup=0' -o 'Acquire::http::Timeout=20' -o 'Acquire::https::Timeout=20' -o 'Acquire::Retries=0' -o 'APT::Update::Error-Mode=any')
+      # Probe the candidate alone, but resolve/install dependencies with the OS
+      # sources retained. Include the legacy main list without modifying it.
+      if ! ${SUDO} apt-get "${opts[@]}" update; then continue; fi
+      local file main_copy parts
+      parts="$(mktemp -d "$work/parts-XXXXXX")" || return 1
+      for file in "${NX_APT_PARTS:-/etc/apt/sources.list.d}"/*; do
+        [[ -f "$file" && "$file" != "$source" ]] || continue
+        cp "$file" "$parts/" || return 1
+      done
+      if [[ -f "${NX_APT_MAIN_SOURCE:-/etc/apt/sources.list}" ]]; then
+        main_copy="$(mktemp "$parts/nginxx-system-XXXXXX.list")" || return 1
+        cp "${NX_APT_MAIN_SOURCE:-/etc/apt/sources.list}" "$main_copy" || return 1
+      fi
+      opts[3]="Dir::Etc::sourceparts=$parts"
       if ! ${SUDO} apt-get "${opts[@]}" update || ! ${SUDO} apt-get "${opts[@]}" install -y nginx; then continue; fi
     else
       ${SUDO} "$pkg" --disablerepo='*' --enablerepo=nginx-stable --setopt=timeout=20 --setopt=retries=1 makecache -y || continue
@@ -149,6 +163,12 @@ nx_install_repository_dependencies() (
   local -a missing=()
   for cmd in python3 curl wget socat gpg; do check_cmd "$cmd" || missing+=("$cmd"); done
   if [[ "$pkg" == apt ]]; then check_cmd lsb_release || missing+=(lsb-release); fi
+  check_cmd crontab || missing+=(crontab)
+  if [[ "$pkg" == apt ]]; then
+    check_cmd cron || missing+=(cron)
+  else
+    check_cmd crond || missing+=(crond)
+  fi
   [[ ${#missing[@]} -gt 0 ]] || return 0
   if [[ "$pkg" == apt ]]; then
     work="$(mktemp -d)" || return 1
@@ -163,5 +183,11 @@ nx_install_repository_dependencies() (
     ${SUDO} apt-get "${opts[@]}" install -y python3 curl wget socat cron gpg lsb-release ca-certificates || return 1
   else
     ${SUDO} "$pkg" --disablerepo='nginx*' --setopt=timeout=20 --setopt=retries=1 install -y python3 curl wget socat cronie gnupg2 || return 1
+  fi
+  check_cmd crontab || { error "安装后 crontab 仍不可用。"; return 1; }
+  if [[ "$pkg" == apt ]]; then
+    check_cmd cron || { error "安装后 cron 仍不可用。"; return 1; }
+  else
+    check_cmd crond || { error "安装后 crond 仍不可用。"; return 1; }
   fi
 )

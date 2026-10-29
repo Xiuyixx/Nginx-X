@@ -169,22 +169,16 @@ bootstrap_install() {
 }
 
 get_script_dir() {
-  local src=""
-  if [[ ${BASH_SOURCE[0]-} != "" ]]; then
-    src="${BASH_SOURCE[0]}"
-  else
-    src="$0"
-  fi
-  if [[ -n "$src" ]] && [[ -e "$src" ]]; then
-    cd "$(dirname "$src")" && pwd
-  else
-    pwd
-  fi
+  # stdin/bash -c entries have no trustworthy source path. Never fall back
+  # to the caller's cwd: an unrelated nx.sh there is not install input.
+  local src="${BASH_SOURCE[0]-}"
+  [[ -n "$src" && -f "$src" ]] || return 1
+  cd "$(dirname "$src")" && pwd
 }
 
 has_local_nx() {
   local script_dir
-  script_dir="$(get_script_dir)"
+  script_dir="$(get_script_dir)" || return 1
   [[ -f "${script_dir}/nx.sh" ]]
 }
 

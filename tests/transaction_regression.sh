@@ -84,25 +84,19 @@ apply_conf_with_rollback "$T/new" "$CONF_DIR/replaced.conf" "$CONF_DIR/site.conf
 grep -q '^# access_policy=strict$' "$CONF_DIR/replaced.conf"
 # The interactive template editor must propagate failed apply and preserve a
 # disabled source without briefly activating it during a successful edit.
-cat > "$CONF_DIR/modify.example-18080.conf.bak" <<'SITE'
-# managed_by=Nginx-X
-# domain=modify.example
-# listen_port=18080
-# backend_port=3000
-server {
- listen 18080;
- server_name modify.example;
- location / { proxy_pass http://127.0.0.1:3000; }
-}
-SITE
+# Use an actual native template: the minimal handwritten fixture is now
+# correctly refused before publication by the template safety guard.
 is_port_used_os() { return 1; }
 ipv6_available() { return 1; }
+build_proxy_conf modify.example 18080 3000 "$CONF_DIR/modify.example-18080.conf.bak"
 cp "$CONF_DIR/modify.example-18080.conf.bak" "$T/modify-before"
 fail_reload=1
-if modify_conf modify.example-18080.conf.bak <<< $'\n\n\n' >/dev/null 2>&1; then echo 'modify hid reload failure' >&2; exit 1; fi
+before="$(cat "$T/reloads")"
+if modify_conf modify.example-18080.conf.bak <<< $'\n\n3001\n' >/dev/null 2>&1; then echo 'modify hid reload failure' >&2; exit 1; fi
 cmp "$T/modify-before" "$CONF_DIR/modify.example-18080.conf.bak"
+[[ "$(cat "$T/reloads")" == "$((before+2))" ]]
 fail_reload=0
-modify_conf modify.example-18080.conf.bak <<< $'\n\n\n' >/dev/null
+modify_conf modify.example-18080.conf.bak <<< $'\n\n3001\n' >/dev/null
 [[ -f "$CONF_DIR/modify.example-18080.conf.bak" && ! -e "$CONF_DIR/modify.example-18080.conf" ]]
 echo 'ok: interactive modify failure propagation and disabled status'
 # Builders only render. A missing WebSocket map is included in the same final

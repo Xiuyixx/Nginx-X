@@ -103,7 +103,7 @@ build_external_proxy_conf() {
   local idx stream_url stream_path stream_host_line stream_redirect_block=""
   local stream_lily_block="" base_lily_block=""
 
-  upstream_host="$(url_host "$upstream_url")"
+  upstream_host="$(url_tls_name "$upstream_url")"
 
   local frontend_scheme="http" domain_port_suffix=""
   [[ "$https_enabled" == "1" ]] && frontend_scheme="https"
@@ -134,6 +134,20 @@ build_external_proxy_conf() {
       return 1
     fi
   done
+
+  # Nginx appends the client URI to a literal proxy_pass URI; it does not
+  # merge a configured query. Reject this unsupported combination before
+  # opening the output file. Client queries and explicit Referer queries work.
+  for candidate in "$upstream_url" "${stream_urls[@]}"; do
+    if [[ "$candidate" == *'?'* ]]; then
+      error "主上游/推流 URL 不支持固定查询参数（?）；客户端请求的查询参数仍会正常转发。" >&2
+      return 1
+    fi
+  done
+  if [[ "$external_mode" == emby_* && ${#stream_urls[@]} -eq 0 ]]; then
+    error "Emby 分流至少需要一个有效推流 URL。" >&2
+    return 1
+  fi
 
   https_meta=""
   https_cert_block=""
@@ -171,7 +185,7 @@ BLOCK
       for idx in "${!stream_urls[@]}"; do
         stream_url="${stream_urls[$idx]}"
         stream_path="/s$((idx + 1))/"
-        stream_host_line="$(url_host "$stream_url")"
+        stream_host_line="$(url_tls_name "$stream_url")"
         stream_redirect_block+="        proxy_redirect ${stream_url} ${frontend_scheme}://${domain}${domain_port_suffix}${stream_path};"$'\n'
 
         if [[ "$external_mode" == "emby_lily" ]]; then
@@ -239,7 +253,7 @@ EOF
 
   if [[ "$external_mode" =~ ^emby_ ]]; then
     main_host_block=$(cat <<EOF
-        proxy_set_header Host ${upstream_host};
+        proxy_set_header Host \$proxy_host;
         proxy_ssl_name ${upstream_host};
 EOF
 )
@@ -569,6 +583,143 @@ def inspect(filename, query=operation):
         servers = [n for n in nodes if n['args'] == ['server'] and n['children'] is not None]
         def directives(n, key): return [x for x in n['children'] if x['args'][0] == key]
         def unquote(s): return s[1:-1] if len(s)>1 and s[0] == s[-1] and s[0] in '\"\'' else s
+        if query == 'tls-ports':
+            ports = set()
+            for srv in servers:
+                for n in directives(srv, 'listen'):
+                    args = [unquote(v) for v in n['args'][1:]]
+                    if not args: fail('missing listen address')
+                    if 'ssl' not in args[1:] or args[0].startswith('unix:'): continue
+                    ports.add(socket(args[0], inspect=True).rsplit(':', 1)[1])
+            print('\n'.join(sorted(ports, key=int)))
+            return
+        if query == 'template-safe':
+            # Compare complete parsed trees with a fresh rendering from the
+            # same parameters. Names alone cannot distinguish template policy
+            # from a custom value or an extra nested block.
+            if len(params) != 3: fail('template comparison requires reference and guard proof')
+            expected = inspect(params[0], 'tree')
+            def value(key):
+                found = metadata.get(key, [])
+                if len(found) > 1: fail('duplicate metadata: ' + key)
+                return found[0][2] if found else ''
+            for key in metadata:
+                value(key)
+            if value('imported') == 'true' or value('edited') == 'true':
+                fail('imported/edited configuration requires manual editing')
+            def shape(node):
+                return (tuple(node['args']), None if node['children'] is None else tuple(shape(n) for n in node['children']))
+            if tuple(shape(n) for n in inspect(params[1], 'tree')) != tuple(shape(n) for n in inspect(params[2], 'tree')):
+                fail('changed derived access guard requires manual editing')
+            def leaves(server, name):
+                found = directives(server, name)
+                if any(n['children'] is not None for n in found): fail('nested ' + name)
+                return found
+            def names(server):
+                found = leaves(server, 'server_name')
+                if len(found) != 1 or len(found[0]['args']) != 2:
+                    fail('template rebuild cannot preserve custom server aliases')
+                return found[0]['args'][1]
+            def listeners(server):
+                found = leaves(server, 'listen')
+                if not found: fail('implicit listener')
+                sockets = []
+                flags = []
+                for n in found:
+                    args = n['args'][1:]
+                    if len(args) < 1: fail('empty listen')
+                    # Only wildcard families emitted by the templates. Explicit
+                    # binding/default/options would otherwise be broadened/lost.
+                    if not re.fullmatch(r'(?:\[::\]:)?[0-9]+', args[0]): fail('custom listener binding')
+                    if args[1:] not in ([], ['ssl'], ['ssl', 'http2']): fail('custom listener options')
+                    sockets.append(args[0])
+                    flags.append('ssl' in args[1:])
+                if len(set(sockets)) != len(sockets) or len(set(flags)) != 1:
+                    fail('duplicate or mixed listeners')
+                if len({v.rsplit(':', 1)[-1] for v in sockets}) != 1: fail('mixed listener ports')
+                return sockets, flags[0]
+            def split(trees):
+                if not 1 <= len(trees) <= 2 or any(n['args'] != ['server'] or n['children'] is None for n in trees):
+                    fail('unknown top-level content')
+                apps = [s for s in trees if any(n['args'][0] == 'proxy_pass' for n in walk(s['children']))]
+                if len(apps) != 1: fail('expected one proxy application')
+                return apps[0], [s for s in trees if s is not apps[0]]
+            app, redirects = split(nodes)
+            reference, reference_redirects = split(expected)
+            domain = names(reference)
+            sockets, tls = listeners(app)
+            reference_sockets, _ = listeners(reference)
+            # The reference renderer is forced to use the existing address
+            # families, not today's IPv6 availability.
+            if sockets != reference_sockets: fail('changed generated listeners')
+            if names(app) != domain: fail('changed generated domain')
+            acme = (('location', '^~', '/.well-known/acme-challenge/'), (
+                (('root', '/usr/share/nginx/html'), None),
+                (('default_type', '"text/plain"'), None),
+                (('try_files', '$uri', '=404'), None)))
+            number = sockets[0].rsplit(':', 1)[-1]
+            for redirect in redirects:
+                rs, rtls = listeners(redirect)
+                if rtls or rs != [('[::]:80' if s.startswith('[') else '80') for s in sockets]:
+                    fail('custom redirect listeners')
+                if names(redirect) != domain: fail('custom redirect aliases')
+                dest = 'https://$host' + ('' if number == '443' else ':' + number) + '$request_uri'
+                body = [shape(n) for n in redirect['children'] if n['args'][0] not in ('listen', 'server_name')]
+                route = (('location', '/'), ((('return', '301', dest), None),))
+                legacy_route = (('return', '301', dest), None)
+                if body not in ([acme, route], [acme, legacy_route]): fail('custom redirect body')
+            if redirects and not tls: fail('redirect beside plain application')
+            # Templates preserve these exact TLS fields on same-domain edits.
+            # Everything else (client verification, ciphers, session policy,
+            # etc.) must refuse rather than silently disappear.
+            def canonical(server, is_reference=False):
+                result = []
+                seen_tls = set()
+                for n in server['children']:
+                    args = n['args']
+                    if args[0] == 'listen':
+                        result.append((('listen', args[1]), None)); continue
+                    if args[0] in ('ssl_certificate', 'ssl_certificate_key', 'ssl_protocols', 'http2'):
+                        if not tls or n['children'] is not None or args[0] in seen_tls:
+                            fail('unexpected/duplicate TLS field')
+                        seen_tls.add(args[0])
+                        if args[0] == 'http2' and args not in (['http2', 'on'], ['http2', 'off']): fail('invalid http2')
+                        if args[0] in ('ssl_certificate', 'ssl_certificate_key') and len(args) != 2: fail('invalid certificate')
+                        if args[0] == 'ssl_protocols' and (len(args) < 2 or any(v not in ('TLSv1', 'TLSv1.1', 'TLSv1.2', 'TLSv1.3') for v in args[1:])):
+                            fail('invalid SSL protocols')
+                        continue
+                    if args == ['ssl_prefer_server_ciphers', 'off'] and n['children'] is None and tls:
+                        if 'ssl_prefer_server_ciphers' in seen_tls: fail('duplicate TLS preference')
+                        seen_tls.add('ssl_prefer_server_ciphers'); continue
+                    item = shape(n)
+                    # Both historical TLS renderers existed: direct TLS omitted
+                    # the application ACME block; HTTP->TLS retained it.
+                    if tls and item == acme: continue
+                    if args == ['location', '/'] and n['children'] is not None:
+                        children = list(item[1])
+                        if (value('proxy_mode') or value('external_mode')) == 'streaming':
+                            cap = (('client_max_body_size', '64m'), None)
+                            # The only intentional body-limit migration: legacy
+                            # stream templates had no cap. Other values refuse.
+                            if not any(x[0][0] == 'client_max_body_size' for x in children):
+                                children.insert(0, cap)
+                            # Sort only this independently scoped cap; preserve
+                            # order/multiplicity of redirects/sub_filters/headers.
+                            children = [x for x in children if x != cap] + [x for x in children if x == cap]
+                        if value('external_mode') in ('emby_http', 'emby_https', 'emby_lily'):
+                            import urllib.parse
+                            old_host = urllib.parse.urlsplit(value('upstream_url')).hostname
+                            children = [((('proxy_set_header', 'Host', '$proxy_host'), None)
+                                if x == (('proxy_set_header', 'Host', old_host), None) else x) for x in children]
+                        item = (item[0], tuple(children))
+                    result.append(item)
+                if tls and not is_reference and not {'ssl_certificate', 'ssl_certificate_key'} <= seen_tls:
+                    fail('missing explicit TLS certificate')
+                return tuple(result)
+            if canonical(app) != canonical(reference, True):
+                fail('custom/changed template directives; use manual editing')
+            print('safe')
+            return
         if query == 'health-inventory':
             import json
             inventory = []

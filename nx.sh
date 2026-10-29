@@ -15,7 +15,7 @@ NC='\033[0m'
 
 # ---------- 全局变量 ----------
 APP_NAME="Nginx-X"
-APP_VERSION="3.4.13"
+APP_VERSION="3.4.14"
 # Alpine 的 nginx 把 server 配置放在 http.d，其他系统用 conf.d
 if [[ -f /etc/nginx/http.d ]] || [[ -d /etc/nginx/http.d ]]; then
   CONF_DIR="/etc/nginx/http.d"
@@ -1028,8 +1028,13 @@ nginx_port_listening() {
 }
 
 port_has_ssl_listener() {
-  local p="$1"
-  grep -R -E "listen[[:space:]]+${p}([[:space:]]|;).*ssl" "${CONF_DIR}"/*.conf >/dev/null 2>&1
+  local p="$1" file ports
+  for file in "$CONF_DIR"/*.conf; do
+    [[ -f "$file" ]] || continue
+    ports="$(nx_conf_query tls-ports "$file")" || return 2
+    if grep -qxF "$p" <<< "$ports"; then return 0; fi
+  done
+  return 1
 }
 
 conf_target_path() {
@@ -1045,7 +1050,9 @@ conf_meta_get() { nx_conf_query meta "$1" "$2"; }
 extract_proxy_pass() { nx_conf_query proxy "$1"; }
 
 url_explicit_port() {
-  printf '%s\n' "$1" | sed -nE 's#^https?://(\[[^]]+\]|[^/:]+):([0-9]+)(/.*)?$#\2#p'
+  local url="${1%%\?*}"
+  url="${url%%#*}"
+  printf '%s\n' "$url" | sed -nE 's#^https?://(\[[^]]+\]|[^/:]+):([0-9]+)(/.*)?$#\2#p'
 }
 
 list_confs_by_meta_domain() {
@@ -1081,43 +1088,63 @@ conf_server_block_count() {
 }
 
 conf_has_custom_locations() {
-  local conf_file="$1"
-
-  # Nginx-X template rebuilds are only safe for locations it can regenerate.
-  # Treat any extra custom location as user-authored logic and avoid silently
-  # deleting it during modify/HTTPS toggle operations.
-  awk '
-    /^[[:space:]]*location[[:space:]]+/ {
-      line=$0
-      if (line ~ /^[[:space:]]*location[[:space:]]+\/[[:space:]]*\{/) next
-      if (line ~ /^[[:space:]]*location[[:space:]]+\^~[[:space:]]+\/\.well-known\/acme-challenge\/[[:space:]]*\{/) next
-      if (line ~ /^[[:space:]]*location[[:space:]]+\/s[0-9]+\/[[:space:]]*\{/) next
-      bad=1
-    }
-    END { exit bad ? 0 : 1 }
-  ' "$conf_file" 2>/dev/null
+  # Preserve the historical predicate, but inspect scope and values rather
+  # than matching line prefixes (compact/nested locations are significant).
+  ! conf_safe_for_template_rebuild "$1"
 }
 
-conf_safe_for_template_rebuild() {
-  local conf_file="$1"
-  local servers
+conf_safe_for_template_rebuild() (
+  local conf_file="$1" stage meta domain port backend tls mode value
+  local strict=0 defaults="" ipv6=0
+  stage="$(mktemp -d /tmp/nginxx-template-check-XXXXXXXX)" || return 1
+  # shellcheck disable=SC2064
+  trap "rm -rf -- $(printf '%q' "$stage")" EXIT
+  for value in imported edited; do
+    meta="$(conf_meta_get "$conf_file" "$value")" || return 1
+    [[ "$meta" != true ]] || return 1
+  done
+  nx_conf_query home-strip "$conf_file" > "$stage/home" || return 1
+  meta="$(nx_conf_query summary "$stage/home")" || return 1
+  IFS='|' read -r domain port backend tls mode <<< "$meta"
+  valid_server_name_input "$domain" && valid_port "$port" || return 1
 
-  [[ "$(conf_meta_get "$conf_file" imported)" == "true" ]] && return 1
-  [[ "$(conf_meta_get "$conf_file" edited)" == "true" ]] && return 1
+  cp "$stage/home" "$stage/plain" || return 1
+  nx_conf_query strip-access "$stage/plain" > "$stage/clean" || return 1
+  grep -q '^ *# nx-access-begin$' "$stage/home" && strict=1
+  defaults="$(conf_meta_get "$stage/home" access_default)" || return 1
+  grep -qE 'listen[[:space:]]+\[::\]:' "$stage/clean" && ipv6=1
+  # Called indirectly by both renderers; retain the existing listener family.
+  # shellcheck disable=SC2317
+  ipv6_available() { [[ "$ipv6" == 1 ]]; }
 
-  servers="$(conf_server_block_count "$conf_file")"
-  [[ -z "$servers" ]] && servers=0
-  (( servers <= 2 )) || return 1
+  mode="$(conf_meta_get "$stage/clean" mode)" || return 1
+  if [[ "$mode" == external ]]; then
+    local upstream external_mode stream streams source_url referer
+    upstream="$(conf_meta_get "$stage/clean" upstream_url)" || return 1
+    external_mode="$(conf_meta_get "$stage/clean" external_mode)" || return 1
+    external_mode="${external_mode:-normal}"
+    case "$external_mode" in normal|streaming|media|emby_http|emby_https|emby_lily) ;; *) return 1 ;; esac
+    stream="$(conf_meta_get "$stage/clean" stream_upstream_url)" || return 1
+    streams="$(conf_meta_get "$stage/clean" stream_upstream_urls)" || return 1
+    source_url="$(conf_meta_get "$stage/clean" source_site_url)" || return 1
+    referer="$(conf_meta_get "$stage/clean" referer_url)" || return 1
+    local secure=0
+    [[ "$tls" != true ]] || secure=1
+    build_external_proxy_conf "$domain" "$port" "$upstream" "$external_mode" "$stage/reference" "$secure" "$stream" "$source_url" "$referer" "$streams" || return 1
+  elif [[ -z "$mode" ]]; then
+    local backend_port proxy_mode
+    backend_port="$(conf_meta_get "$stage/clean" backend_port)" || return 1
+    if [[ -z "$backend_port" && "$backend" =~ ^http://127\.0\.0\.1:([0-9]+)$ ]]; then backend_port="${BASH_REMATCH[1]}"; fi
+    valid_port "$backend_port" || return 1
+    proxy_mode="$(conf_meta_get "$stage/clean" proxy_mode)" || return 1
+    build_proxy_conf "$domain" "$port" "$backend_port" "$stage/reference" "${proxy_mode:-normal}" || return 1
+  else
+    return 1
+  fi
 
-  local clean rc=0
-  clean="$(mktemp)" || return 1
-  nx_conf_query home-strip "$conf_file" > "$clean" || { rm -f "$clean"; return 1; }
-  if conf_has_custom_locations "$clean"; then rc=1; fi
-  rm -f "$clean"
-  (( rc == 0 )) || return 1
-
-  return 0
-}
+  nx_access_parse "$stage/home" transform "$strict" "$defaults" > "$stage/guards" || return 1
+  nx_conf_query template-safe "$stage/clean" "$stage/reference" "$stage/home" "$stage/guards" >/dev/null
+)
 
 require_template_rebuild_safe() {
   local conf_file="$1"
@@ -1149,6 +1176,8 @@ url_host() {
   #   http://[2001:db8::1]:8080/     -> 2001:db8::1
   url="${url#*://}"
   url="${url%%/*}" # authority
+  url="${url%%\?*}"
+  url="${url%%#*}"
 
   if [[ "$url" == \[*\]* ]]; then
     # If no port, authority may look like: [2001:db8::1]
@@ -1161,6 +1190,14 @@ url_host() {
 
   url="${url%%:*}"
   echo "$url"
+}
+
+url_tls_name() {
+  local host
+  host="$(url_host "$1")" || return 1
+  # Nginx suppresses SNI for IPv4 and bracketed IPv6 literals; a naked IPv6
+  # name would instead be sent as an invalid DNS SNI value.
+  if [[ "$host" == *:* ]]; then printf '[%s]\n' "$host"; else printf '%s\n' "$host"; fi
 }
 
 ipv6_available() {
@@ -1193,6 +1230,8 @@ url_scheme() {
 
 default_referer_from_url() {
   local base="$1"
+  base="${base%%\?*}"
+  base="${base%%#*}"
   base="${base%/}"
   echo "${base}/web/index.html"
 }
@@ -1341,7 +1380,7 @@ ensure_ssl_directives_present() {
 
 add_reverse_proxy() {
   local domain listen_port backend_port target tmp proxy_mode
-  local desired_port create_port force_enable_https="0"
+  local desired_port create_port force_enable_https="0" tls_status=0
 
   require_nginx_installed || return 1
 
@@ -1386,7 +1425,13 @@ add_reverse_proxy() {
     fi
 
     # 非 443 的复用端口，如果当前端口已用于 HTTPS 监听，也要避免直接写入纯 HTTP 配置
-    if port_has_ssl_listener "$desired_port"; then
+    tls_status=0
+    port_has_ssl_listener "$desired_port" || tls_status=$?
+    if (( tls_status > 1 )); then
+      error "无法解析现有 TLS 监听；未创建站点，请先检查现有配置。"
+      return 1
+    fi
+    if (( tls_status == 0 )); then
       if [[ -f "${SSL_DIR}/${domain}/fullchain.pem" && -f "${SSL_DIR}/${domain}/privkey.pem" ]]; then
         warn "检测到端口 ${desired_port} 已用于 HTTPS，且当前域名已有证书。"
         warn "将在临时文件生成最终 HTTPS 配置，再一次性发布。"
@@ -1471,7 +1516,7 @@ add_reverse_proxy() {
 add_external_url_proxy() {
   local domain listen_port upstream_url target tmp external_mode
   local stream_upstream_url="" stream_upstream_urls="" source_site_url="" referer_url=""
-  local desired_port create_port force_enable_https="0"
+  local desired_port create_port force_enable_https="0" tls_status=0
 
   require_nginx_installed || return 1
 
@@ -1534,7 +1579,13 @@ add_external_url_proxy() {
       create_port="80"
     fi
 
-    if port_has_ssl_listener "$desired_port"; then
+    tls_status=0
+    port_has_ssl_listener "$desired_port" || tls_status=$?
+    if (( tls_status > 1 )); then
+      error "无法解析现有 TLS 监听；未创建站点，请先检查现有配置。"
+      return 1
+    fi
+    if (( tls_status == 0 )); then
       if [[ -f "${SSL_DIR}/${domain}/fullchain.pem" && -f "${SSL_DIR}/${domain}/privkey.pem" ]]; then
         warn "检测到端口 ${desired_port} 已用于 HTTPS，且当前域名已有证书。"
         warn "将在临时文件生成最终 HTTPS 配置，再一次性发布。"
@@ -1696,8 +1747,29 @@ print_conf_list() {
   return 0
 }
 
-modify_conf() {
-  local file src mode
+# Hold no lock while waiting for input. Read one immutable snapshot and compare
+# its identity/bytes under the transaction lock immediately before publication.
+# Bash dynamically scopes these locals into the callback; ShellCheck cannot
+# model that callback boundary.
+# shellcheck disable=SC2030,SC2031
+nx_modify_with_snapshot() (
+  local callback="$1" file="${2:-}" stage
+  [[ -n "$file" ]] || { error "未指定配置文件。"; return 1; }
+  stage="$(mktemp -d /tmp/nginxx-modify-XXXXXXXX)" || return 1
+  NX_MODIFY_STAGE="$stage"
+  trap 'rm -rf -- "$NX_MODIFY_STAGE"' EXIT
+  nx_conf_snapshot "$CONF_DIR/$file" "$stage" || return 1
+  # Consumed by nested helpers and the transaction through Bash dynamic scope.
+  # shellcheck disable=SC2034
+  local NX_CAS_SOURCE="$CONF_DIR/$file" NX_CAS_DIR="$stage"
+  "$callback" "$file" "$stage/base"
+)
+
+modify_conf() { nx_modify_with_snapshot nx_modify_conf_from_snapshot "${1:-}"; }
+modify_external_conf() { nx_modify_with_snapshot nx_modify_external_from_snapshot "${1:-}"; }
+
+nx_modify_conf_from_snapshot() {
+  local file src mode base="$2"
   file="${1:-}"
   if [[ -z "$file" ]]; then
     error "未指定配置文件。"
@@ -1705,27 +1777,27 @@ modify_conf() {
   fi
   src="${CONF_DIR}/${file}"
 
-  require_template_rebuild_safe "$src" "修改配置" || return 1
+  require_template_rebuild_safe "$base" "修改配置" || return 1
 
-  mode="$(conf_meta_get "$src" mode)"
+  mode="$(conf_meta_get "$base" mode)"
   if [[ "$mode" == "external" ]]; then
-    modify_external_conf "$file"
+    nx_modify_external_from_snapshot "$file" "$base"
     return $?
   fi
 
   local current_domain current_listen current_backend current_mode new_mode
   local new_domain new_listen new_backend tmp new_target
 
-  current_domain="$(extract_domain_from_conf "$src")"
-  current_listen="$(_extract_conf_meta "$src" | cut -d '|' -f2)"
-  current_backend="$(conf_meta_get "$src" backend_port)"
+  current_domain="$(extract_domain_from_conf "$base")"
+  current_listen="$(_extract_conf_meta "$base" | cut -d '|' -f2)"
+  current_backend="$(conf_meta_get "$base" backend_port)"
   [[ -z "$current_listen" ]] && current_listen="80"
   # 元数据缺失时从实际 proxy_pass 提取后端端口
   if [[ -z "$current_backend" ]]; then
-    current_backend="$(extract_proxy_pass "$src" | sed -nE 's#^https?://127\.0\.0\.1:([0-9]+)(/.*)?$#\1#p')"
+    current_backend="$(extract_proxy_pass "$base" | sed -nE 's#^https?://127\.0\.0\.1:([0-9]+)(/.*)?$#\1#p')"
   fi
   if [[ -z "$current_backend" ]]; then
-    current_backend="$(extract_proxy_pass "$src" | sed -nE 's#^https?://localhost:([0-9]+)(/.*)?$#\1#p')"
+    current_backend="$(extract_proxy_pass "$base" | sed -nE 's#^https?://localhost:([0-9]+)(/.*)?$#\1#p')"
   fi
   [[ -z "$current_backend" ]] && current_backend="3000"
 
@@ -1750,7 +1822,7 @@ modify_conf() {
     return 1
   fi
 
-  current_mode="$(conf_meta_get "$src" proxy_mode)"
+  current_mode="$(conf_meta_get "$base" proxy_mode)"
   [[ -n "$current_mode" ]] || current_mode="normal"
   note "当前方案：$(external_mode_name "$current_mode")"
   new_mode="$(select_external_mode "$current_mode" internal)" || return $?
@@ -1767,7 +1839,7 @@ modify_conf() {
   tmp="$(mktemp /tmp/nginxx-mod-"${new_domain}"-XXXXXX)"
   trap 'rm -f "${tmp:-}"' RETURN
   build_proxy_conf "$new_domain" "$new_listen" "$new_backend" "$tmp" "$new_mode" || return 1
-  nx_preserve_modify_tls "$src" "$tmp" "$new_domain" "$new_listen" || return 1
+  nx_preserve_modify_tls "$base" "$tmp" "$new_domain" "$new_listen" || return 1
   new_target="$(conf_target_path "$new_domain" "$new_listen")"
   [[ "$src" == *.conf.bak ]] && new_target="${new_target}.bak"
   apply_conf_with_rollback "$tmp" "$new_target" "$src" || return 1
@@ -1776,7 +1848,8 @@ modify_conf() {
 
 }
 
-modify_external_conf() {
+nx_modify_external_from_snapshot() {
+  local base="$2"
   local file src current_domain current_listen current_upstream_url current_mode
   local current_stream_upstream_url current_stream_upstream_urls current_source_site_url current_referer_url
   local new_domain new_listen new_upstream_url new_mode new_stream_upstream_url new_stream_upstream_urls new_source_site_url new_referer_url
@@ -1790,16 +1863,16 @@ modify_external_conf() {
     return 1
   }
 
-  require_template_rebuild_safe "$src" "修改外部反代配置" || return 1
+  require_template_rebuild_safe "$base" "修改外部反代配置" || return 1
 
-  current_domain="$(extract_domain_from_conf "$src")"
-  current_listen="$(_extract_conf_meta "$src" | cut -d '|' -f2)"
-  current_upstream_url="$(conf_meta_get "$src" upstream_url)"
-  current_mode="$(conf_meta_get "$src" external_mode)"
-  current_stream_upstream_url="$(conf_meta_get "$src" stream_upstream_url)"
-  current_stream_upstream_urls="$(conf_meta_get "$src" stream_upstream_urls)"
-  current_source_site_url="$(conf_meta_get "$src" source_site_url)"
-  current_referer_url="$(conf_meta_get "$src" referer_url)"
+  current_domain="$(extract_domain_from_conf "$base")"
+  current_listen="$(_extract_conf_meta "$base" | cut -d '|' -f2)"
+  current_upstream_url="$(conf_meta_get "$base" upstream_url)"
+  current_mode="$(conf_meta_get "$base" external_mode)"
+  current_stream_upstream_url="$(conf_meta_get "$base" stream_upstream_url)"
+  current_stream_upstream_urls="$(conf_meta_get "$base" stream_upstream_urls)"
+  current_source_site_url="$(conf_meta_get "$base" source_site_url)"
+  current_referer_url="$(conf_meta_get "$base" referer_url)"
 
   [[ -z "$current_mode" ]] && current_mode="normal"
   [[ -z "$current_listen" ]] && current_listen="80"
@@ -1882,7 +1955,7 @@ modify_external_conf() {
   tmp="$(mktemp /tmp/nginxx-external-mod-XXXXXX)" || return 1
   trap 'rm -f "${tmp:-}"' RETURN
   build_external_proxy_conf "$new_domain" "$new_listen" "$new_upstream_url" "$new_mode" "$tmp" "0" "$new_stream_upstream_url" "$new_source_site_url" "$new_referer_url" "$new_stream_upstream_urls" || return 1
-  nx_preserve_modify_tls "$src" "$tmp" "$new_domain" "$new_listen" || return 1
+  nx_preserve_modify_tls "$base" "$tmp" "$new_domain" "$new_listen" || return 1
   apply_conf_with_rollback "$tmp" "$new_target" "$src" || return 1
   info "配置已修改，保留原协议与启停状态。"
   rm -f "$tmp"

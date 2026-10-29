@@ -18,6 +18,9 @@ nx_transaction() (
   # directory rollback. Reject them before any migration/callback can write.
   nx_transaction_paths_safe || return 1
   # Compare before snapshots, migration or any protection state publication.
+  # The wizard's subshell dynamically scopes CAS locals into this transaction;
+  # no propagation back to the parent shell is required (source/bundle tested).
+  # shellcheck disable=SC2031
   if [[ -n ${NX_CAS_SOURCE:-} ]] && ! nx_conf_snapshot_matches "$NX_CAS_SOURCE" "$NX_CAS_DIR"; then
     error "配置编辑冲突：源文件已更改、删除或改名；未发布任何配置。"
     return 1

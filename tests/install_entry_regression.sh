@@ -97,6 +97,27 @@ for mode in readme bash-c stdin file local; do
     cmp "$root/expected" "$NX_ENTRY_LOG"
   fi
 done
+# Remote text must ignore both an unrelated local nx.sh and an existing $0.
+mkdir -p "$root/untrusted/tools"
+printf '# unrelated source\n' > "$root/untrusted/nx.sh"
+# shellcheck disable=SC2016 # Literal fixture variable belongs to its child shell.
+printf '#!/bin/sh\necho UNTRUSTED > "$NX_ENTRY_LOG"; exit 94\n' > "$root/untrusted/tools/build-bundle.sh"
+printf '# misleading argv zero\n' > "$root/untrusted/bash"
+for mode in readme bash-c stdin; do
+  INSTALL_DIR="$root/untrusted-install-$mode" TARGET_BIN="$root/bin/untrusted-$mode"
+  : > "$NX_ENTRY_LOG"
+  (
+    cd "$root/untrusted"
+    case "$mode" in
+      readme) bash -c "$readme_command" ;;
+      bash-c) bash -uc "$(cat "$installer")" "$root/untrusted/bash" --no-run ;;
+      stdin) bash -us -- --no-run < "$installer" ;;
+    esac
+  ) > "$root/untrusted-$mode.out" 2>&1
+  printf 'clone\nbundle\ndependencies\n' > "$root/expected"
+  cmp "$root/expected" "$NX_ENTRY_LOG"
+  [[ -x "$TARGET_BIN" ]]
+done
 # Source is still a library-only operation even when the caller uses nounset.
 : > "$NX_ENTRY_LOG"
 INSTALL_DIR="$root/source-install" TARGET_BIN="$root/source-bin" bash -uc '

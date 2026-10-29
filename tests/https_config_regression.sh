@@ -150,6 +150,28 @@ if require_template_rebuild_safe "$custom_conf" "测试" >/dev/null 2>&1; then
   exit 1
 fi
 
+# Custom directives inside the managed location are equally destructive to
+# replace, even when there is no extra location block.
+custom_directive_conf="$TMPDIR_ROOT/custom-directive.conf"
+cat > "$custom_directive_conf" <<'EOF'
+# managed_by=Nginx-X
+# domain=custom-directive.example.com
+# listen_port=80
+server {
+    listen 80;
+    server_name custom-directive.example.com;
+    location / {
+        deny all;
+        add_header X-User-Custom preserved;
+        proxy_pass http://127.0.0.1:3000;
+    }
+}
+EOF
+if require_template_rebuild_safe "$custom_directive_conf" "测试" >/dev/null 2>&1; then
+  echo "custom directives inside managed location should be rejected" >&2
+  exit 1
+fi
+
 multi_server_conf="$TMPDIR_ROOT/multi-server.conf"
 cat > "$multi_server_conf" <<'EOF'
 server { listen 80; server_name one.example.com; }
@@ -255,7 +277,22 @@ grep -q 'proxy_pass http://127.0.0.1:3000;' "$http_conf"
 [[ "$(url_host 'https://example.com:8443/a/b')" == "example.com" ]]
 [[ "$(url_explicit_port 'http://127.0.0.1:3000/path')" == "3000" ]]
 [[ "$(url_explicit_port 'https://[2001:db8::1]:8443/path')" == "8443" ]]
+[[ "$(url_explicit_port 'https://[2001:db8::1]:8443?token=1')" == "8443" ]]
+[[ "$(url_host 'https://example.com:8443?token=1#fragment')" == "example.com" ]]
+[[ "$(url_host 'https://[2001:db8::1]:8443?token=1')" == "2001:db8::1" ]]
+[[ "$(default_referer_from_url 'https://example.com/base?token=1#fragment')" == "https://example.com/base/web/index.html" ]]
 [[ -z "$(url_explicit_port 'https://example.com/path')" ]]
+
+# A fixed upstream query cannot be represented safely by literal proxy_pass;
+# reject it before a configuration is written.
+if build_external_proxy_conf example.com 18080 'http://127.0.0.1:3000/api?fixed=1' normal "$TMPDIR_ROOT/query.conf" >/dev/null 2>&1; then
+  echo 'fixed upstream query should be rejected' >&2
+  exit 1
+fi
+if build_external_proxy_conf example.com 18080 'http://[::1]:3000/api?fixed=1' emby_http "$TMPDIR_ROOT/query-emby.conf" >/dev/null 2>&1; then
+  echo 'fixed stream query should be rejected' >&2
+  exit 1
+fi
 
 proxy_extract_conf="$TMPDIR_ROOT/proxy-extract.conf"
 cat > "$proxy_extract_conf" <<'EOF'

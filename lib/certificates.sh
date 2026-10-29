@@ -349,11 +349,23 @@ load_email() {
 
 save_email() {
   local email="$1"
-  ensure_state_dir
-  ( umask 077
-    printf 'ACME_EMAIL=%q\n' "$email" > "$EMAIL_CONF"
-  )
-  chmod 600 "$EMAIL_CONF"
+  local parent tmp
+  ensure_state_dir || { error "无法准备邮箱配置目录。"; return 1; }
+  parent="$(dirname "$EMAIL_CONF")" || return 1
+  [[ ! -L "$EMAIL_CONF" && ( ! -e "$EMAIL_CONF" || -f "$EMAIL_CONF" ) ]] || {
+    error "邮箱配置目标不是普通文件。"; return 1;
+  }
+  tmp="$(umask 077; mktemp "$parent/.email.conf.XXXXXX")" || {
+    error "无法创建邮箱配置临时文件。"; return 1;
+  }
+  if ! (
+    umask 077
+    printf 'ACME_EMAIL=%q\n' "$email" > "$tmp" || exit 1
+  ) || ! chmod 600 "$tmp" || ! mv -fT -- "$tmp" "$EMAIL_CONF"; then
+    rm -f -- "$tmp"
+    error "邮箱配置保存失败，原配置未更改。"
+    return 1
+  fi
   info "邮箱已保存到：${EMAIL_CONF}"
 }
 
@@ -617,7 +629,7 @@ set_acme_email() {
     error "邮箱格式不合法。请输入类似 user@example.com 的邮箱地址。"
     return 1
   fi
-  save_email "$email"
+  save_email "$email" || return 1
 }
 
 ensure_email_interactive() {
@@ -634,7 +646,7 @@ ensure_email_interactive() {
     return 1
   fi
 
-  save_email "$email"
+  save_email "$email" || return 1
   # shellcheck disable=SC2034
   ACME_EMAIL="$email"
 }

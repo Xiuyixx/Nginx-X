@@ -36,7 +36,8 @@ gpg() {
 # All package operations are mocks; log isolated options and force failures.
 apt-get() {
   printf '%s\n' "$*" >> "$T/packages"
-  [[ "$*" == *"Dir::Etc::sourcelist=$NX_APT_SOURCE"* && "$*" == *'Dir::Etc::sourceparts=-'* ]] || return 99
+  [[ "$*" == *"Dir::Etc::sourcelist=$NX_APT_SOURCE"* && "$*" == *'Dir::Etc::sourceparts='* ]] || return 99
+  if [[ "$*" == *install* ]]; then [[ "$*" != *'Dir::Etc::sourceparts=-'* ]] || return 99; fi
   if [[ ${FAIL:-0} == all ]]; then return 1; fi
   if [[ ${FAIL:-0} == refresh && "$*" == *update* ]] && grep -q 'nginx.org' "$NX_APT_SOURCE"; then return 1; fi
   if [[ ${FAIL:-0} == download && "$*" == *install* ]] && grep -q 'nginx.org' "$NX_APT_SOURCE"; then return 1; fi

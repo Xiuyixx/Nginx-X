@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# shellcheck disable=SC2317,SC2016
+# shellcheck disable=SC2317,SC2016,SC2031 # port is intentionally assigned in the probe subshell
 set -euo pipefail
 # shellcheck source=tests/fixtures/test-environment.sh
 source "$(dirname "${BASH_SOURCE[0]}")/fixtures/test-environment.sh"

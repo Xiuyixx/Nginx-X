@@ -546,7 +546,7 @@ show_nginx_realtime_status() {
     prev_ticks="$ticks"
     mem="$(awk -v r="$rss" -v p="$page_size" -v m="$mem_total" 'BEGIN{if(m>0)printf "%.1f",r*p/1024/m*100;else print "N/A"}')"
 
-    workers="$(pgrep -fc 'nginx: worker process' 2>/dev/null || echo 0)"
+    workers="$(pgrep -fc 'nginx: worker process' 2>/dev/null)" || workers=0
     master_pid="$(pgrep -xo nginx 2>/dev/null || true)"
     if [[ -n "$master_pid" ]]; then
       start_time="$(ps -p "$master_pid" -o lstart= 2>/dev/null | awk '{$1=$1;print}')"
@@ -739,9 +739,20 @@ nx_traffic_rows() {
 # No sourcing state files, dependency setup, migration or acme invocation.
 # Even a tampered DNS configuration must never execute or display its values.
 system_info_panel() {
-  python3 - "${NX_OS_RELEASE:-/etc/os-release}" "$CONF_DIR" "$SSL_DIR" "$DNS_CONF" "$HOME/.acme.sh/acme.sh" <<'PYINFO'
+  local enabled=0 file
+  if [[ ! -r "$CONF_DIR" || ! -x "$CONF_DIR" ]]; then
+    enabled=未知
+  else
+    for file in "$CONF_DIR"/*.conf; do
+      [[ -f "$file" ]] || continue
+      nx_managed_conf_is_helper "$file" && continue
+      ((enabled+=1))
+    done
+  fi
+  python3 - "${NX_OS_RELEASE:-/etc/os-release}" "$CONF_DIR" "$SSL_DIR" "$DNS_CONF" "$HOME/.acme.sh/acme.sh" "$enabled" <<'PYINFO'
 import pathlib, re, shlex, sys
-osfile, conf, ssl, dns, acme = map(pathlib.Path, sys.argv[1:])
+osfile, conf, ssl, dns, acme = map(pathlib.Path, sys.argv[1:6])
+enabled = sys.argv[6]
 name = '未知'
 try:
     for line in osfile.read_text().splitlines():
@@ -750,8 +761,6 @@ try:
             if len(fields) == 1: name = fields[0]
 except (OSError, ValueError): pass
 print('系统: ' + ''.join(c for c in name if c.isprintable()))
-try: enabled = sum(p.is_file() for p in conf.glob('*.conf'))
-except OSError: enabled = '未知'
 print('已启用站点配置数: ' + str(enabled))
 try: certs = sum(p.is_file() for p in ssl.glob('*/fullchain.pem'))
 except OSError: certs = '未知'

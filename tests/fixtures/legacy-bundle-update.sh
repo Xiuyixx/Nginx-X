@@ -1,3 +1,4 @@
+# shellcheck shell=bash
 update_script() {
   # 优先使用当前脚本所在目录（如果它本身是个 git 仓库），
   # 其次 fallback 到传统安装目录 REPO_INSTALL_DIR（/opt/Nginx-X）。
