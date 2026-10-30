@@ -33,45 +33,54 @@ while True:
     parent = os.path.dirname(parent)
 
 def decode_q(value):
-    # Decode the subset emitted by Bash printf %q without evaluating it.
+    # No eval/source: quoted legacy values and Bash %q are data only.
     if value.startswith("$'"):
-        if len(value) < 3 or not value.endswith("'"):
+        if not value.endswith("'") or len(value) < 3:
             raise ValueError('unterminated ANSI-C value')
-        body = value[2:-1]
-        out = []
-        i = 0
-        while i < len(body):
-            if body[i] != '\\':
-                out.append(body[i]); i += 1; continue
-            i += 1
-            if i >= len(body): raise ValueError('trailing escape')
-            c = body[i]; i += 1
-            simple = {'a':'\a', 'b':'\b', 'e':'\x1b', 'f':'\f', 'n':'\n',
-                      'r':'\r', 't':'\t', 'v':'\v', '\\':'\\', "'":"'"}
+        body=value[2:-1]; out=bytearray(); i=0
+        simple={'a':7,'b':8,'e':27,'E':27,'f':12,'n':10,'r':13,'t':9,'v':11,
+                '\\':92,"'":39,'"':34,'?':63}
+        while i<len(body):
+            c=body[i]; i+=1
+            if c!='\\':
+                out.extend(c.encode('utf-8')); continue
+            if i==len(body): raise ValueError('trailing escape')
+            c=body[i]; i+=1
             if c in simple:
                 out.append(simple[c]); continue
-            if c in 'xXuU':
-                width = {'x':2, 'X':2, 'u':4, 'U':8}[c]
-                digits = body[i:i+width]
-                if len(digits) != width or not re.fullmatch(r'[0-9a-fA-F]+', digits):
-                    raise ValueError('invalid escape')
-                out.append(chr(int(digits, 16))); i += width; continue
             if c in '01234567':
-                digits = c
-                while i < len(body) and len(digits) < 3 and body[i] in '01234567':
-                    digits += body[i]; i += 1
-                out.append(chr(int(digits, 8))); continue
-            out.append(c)
-        return ''.join(out)
-    out = []
-    i = 0
-    while i < len(value):
-        if value[i] == '\\':
-            i += 1
-            if i >= len(value): raise ValueError('trailing escape')
-            out.append(value[i]); i += 1
-        else:
-            out.append(value[i]); i += 1
+                digits=c
+                while i<len(body) and len(digits)<3 and body[i] in '01234567':
+                    digits+=body[i]; i+=1
+                out.append(int(digits,8)); continue
+            if c in 'xuU':
+                width={'x':2,'u':4,'U':8}[c]
+                match=re.match(r'[0-9a-fA-F]{1,'+str(width)+'}',body[i:])
+                if not match: raise ValueError('invalid escape')
+                i+=len(match[0]); number=int(match[0],16)
+                if c=='x': out.append(number)
+                else: out.extend(chr(number).encode('utf-8'))
+                continue
+            # Bash preserves the backslash on unknown ANSI-C escapes.
+            out.extend(('\\'+c).encode('utf-8'))
+        return out.decode('utf-8')
+    if value.startswith("'"):
+        if not value.endswith("'") or len(value)<2 or "'" in value[1:-1]:
+            raise ValueError('invalid single-quoted value')
+        return value[1:-1]
+    quoted=value.startswith('"')
+    if quoted:
+        if not value.endswith('"') or len(value)<2:
+            raise ValueError('invalid double-quoted value')
+        value=value[1:-1]
+    out=[]; i=0
+    while i<len(value):
+        c=value[i]; i+=1
+        if c=='\\':
+            if i==len(value): raise ValueError('trailing escape')
+            if quoted and value[i] not in '\\"$`': out.append('\\')
+            out.append(value[i]); i+=1
+        else: out.append(c)
     return ''.join(out)
 
 found = {}
@@ -83,8 +92,11 @@ with open(path, encoding='utf-8', newline='') as stream:
         match = re.fullmatch(r'([A-Za-z_][A-Za-z0-9_]*)=(.*)', line)
         if not match or match[1] not in allowed or match[1] in found:
             raise SystemExit('invalid state file')
-        value = decode_q(match[2])
-        if '\n' in value or '\r' in value:
+        try:
+            value = decode_q(match[2])
+        except (ValueError, UnicodeError):
+            raise SystemExit('invalid state value encoding')
+        if any(c in value for c in ('\n', '\r', '\0')):
             raise SystemExit('newline is not allowed in state values')
         found[match[1]] = value
 if wanted in found:
@@ -93,19 +105,18 @@ PYSTATE
 }
 
 load_dns_conf() {
-  ensure_state_dir
   unset DNS_PROVIDER DNS_KEY1 DNS_KEY2
-  if [[ -f "$DNS_CONF" ]]; then
-    DNS_PROVIDER="$(nx_state_read "$DNS_CONF" DNS_PROVIDER)" || {
-      error "DNS API 配置文件格式或权限不安全：${DNS_CONF}"; return 1;
-    }
-    DNS_KEY1="$(nx_state_read "$DNS_CONF" DNS_KEY1)" || {
-      error "DNS API 配置文件格式或权限不安全：${DNS_CONF}"; return 1;
-    }
-    DNS_KEY2="$(nx_state_read "$DNS_CONF" DNS_KEY2)" || {
-      error "DNS API 配置文件格式或权限不安全：${DNS_CONF}"; return 1;
-    }
+  ensure_state_dir || return 2
+  local provider='' key1='' key2=''
+  if [[ -e "$DNS_CONF" || -L "$DNS_CONF" ]]; then
+    if ! provider="$(nx_state_read "$DNS_CONF" DNS_PROVIDER)" ||
+       ! key1="$(nx_state_read "$DNS_CONF" DNS_KEY1)" ||
+       ! key2="$(nx_state_read "$DNS_CONF" DNS_KEY2)"; then
+      error "DNS API 配置文件格式或权限不安全：${DNS_CONF}" >&2
+      return 2
+    fi
   fi
+  DNS_PROVIDER="$provider" DNS_KEY1="$key1" DNS_KEY2="$key2"
   case "${DNS_PROVIDER:-}" in
     cloudflare) DNS_PROVIDER=cf ;; dnspod) DNS_PROVIDER=dp ;;
     alidns) DNS_PROVIDER=ali ;; he.net) DNS_PROVIDER=he ;;
@@ -147,12 +158,12 @@ save_dns_conf() {
 }
 
 has_dns_config() {
-  load_dns_conf
+  load_dns_conf || return $?
   [[ -n "${DNS_PROVIDER:-}" && -n "${DNS_KEY1:-}" ]]
 }
 
 get_dns_issue_args() {
-  load_dns_conf
+  load_dns_conf || return $?
   case "${DNS_PROVIDER:-}" in
     cf|cloudflare)
       echo "--dns dns_cf"
@@ -236,8 +247,8 @@ setup_dns_api() {
 }
 
 export_dns_env() {
-  load_dns_conf
-  # DNS_KEY1/DNS_KEY2 are sourced from $DNS_CONF by load_dns_conf; shellcheck can't see the assignment.
+  load_dns_conf || return $?
+  # DNS_KEY1/DNS_KEY2 are assigned by load_dns_conf after safe parsing.
   # shellcheck disable=SC2153
   case "${DNS_PROVIDER:-}" in
     cf) export CF_Token="${DNS_KEY1}" ;;
@@ -259,6 +270,8 @@ detect_cert_mode() {
   elif has_dns_config; then
     echo "dns"
   else
+    local rc=$?
+    [[ "$rc" == 1 ]] || return "$rc"
     echo "http"
   fi
 }
@@ -282,7 +295,10 @@ select_cert_mode_interactive() {
 
   case "$choice" in
     2)
-      if ! has_dns_config; then
+      local dns_rc=0
+      has_dns_config || dns_rc=$?
+      (( dns_rc <= 1 )) || return "$dns_rc"
+      if (( dns_rc == 1 )); then
         >&2 warn "DNS API Token not configured, please set up first."
         local setup_rc=0
         setup_dns_api >&2 || setup_rc=$?
@@ -304,7 +320,7 @@ select_cert_mode_interactive() {
 
 issue_cert_dns_interactive() {
   local dns_domain
-  load_email
+  load_email || return 1
   [[ -n "${ACME_EMAIL:-}" ]] || { error "请先设置邮箱。"; return 1; }
   read -rp "请输入域名: " dns_domain || return 10
   valid_domain "$dns_domain" || { error "域名格式不合法。"; return 1; }
@@ -316,7 +332,7 @@ _issue_cert_dns() {
   valid_domain "$domain" || return 1
   local dns_args issue_output retry_after
 
-  load_email
+  load_email || return 1
   if [[ -z "${ACME_EMAIL:-}" ]]; then
     error "未设置邮箱，无法申请证书。"
     return 1
@@ -327,7 +343,7 @@ _issue_cert_dns() {
     return 1
   fi
 
-  dns_args="$(get_dns_issue_args)"
+  dns_args="$(get_dns_issue_args)" || return 1
   if [[ -z "$dns_args" ]]; then
     error "不支持的 DNS 服务商配置，请重新设置。"
     return 1
@@ -336,7 +352,7 @@ _issue_cert_dns() {
   ensure_acme_installed || return 1
 
   note "开始为 ${domain} 申请证书（DNS-01 验证）..."
-  export_dns_env
+  export_dns_env || return 1
   "$HOME/.acme.sh/acme.sh" --set-default-ca --server letsencrypt >/dev/null 2>&1 || true
   "$HOME/.acme.sh/acme.sh" --register-account -m "$ACME_EMAIL" >/dev/null 2>&1 || true
 
@@ -443,11 +459,11 @@ _issue_cert_http() (
 )
 
 load_email() {
-  ensure_state_dir
   unset ACME_EMAIL
-  if [[ -f "$EMAIL_CONF" ]]; then
+  ensure_state_dir || return 1
+  if [[ -e "$EMAIL_CONF" || -L "$EMAIL_CONF" ]]; then
     ACME_EMAIL="$(nx_state_read "$EMAIL_CONF" ACME_EMAIL)" || {
-      error "邮箱配置文件格式或权限不安全：${EMAIL_CONF}"; return 1;
+      error "邮箱配置文件格式或权限不安全：${EMAIL_CONF}" >&2; return 1;
     }
   fi
 }
@@ -742,7 +758,7 @@ set_acme_email() {
 
 ensure_email_interactive() {
   # 若未设置邮箱，允许在当前界面直接录入并保存
-  load_email
+  load_email || return 1
   if [[ -n "${ACME_EMAIL:-}" ]]; then
     return 0
   fi
@@ -892,7 +908,7 @@ precheck_http01() {
 
 issue_cert() {
   local domain cert_mode
-  load_email
+  load_email || return 1
 
   if [[ -z "${ACME_EMAIL:-}" ]]; then
     error "未设置邮箱。请先在证书管理里执行 [1) 设置邮箱]。"
@@ -917,7 +933,7 @@ issue_cert() {
 issue_cert_for_domain() {
   local domain="$1"
   local cert_mode="${2:-}"
-  load_email
+  load_email || return 1
 
   if [[ -z "${ACME_EMAIL:-}" ]]; then
     error "未设置邮箱，无法自动申请证书。请先在证书管理里设置邮箱。"
@@ -925,7 +941,7 @@ issue_cert_for_domain() {
   fi
 
   if [[ -z "$cert_mode" ]]; then
-    cert_mode="$(detect_cert_mode)"
+    cert_mode="$(detect_cert_mode)" || return 1
   fi
 
   if [[ "$cert_mode" == "dns" ]]; then
@@ -954,7 +970,7 @@ cert_list_action_menu() {
 
     case "$c" in
       1)
-        load_email
+        load_email || return 1
         if [[ -z "${ACME_EMAIL:-}" ]]; then
           if ! ensure_email_interactive; then
             error "邮箱未设置，无法重新申请。"
