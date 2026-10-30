@@ -103,6 +103,7 @@ eval "$saved_fixtures"
 ensure_state_dir() { :; }
 DNS_CONF="$root/dns.conf"
 printf 'DNS_PROVIDER=cloudflare\nDNS_KEY1=test-token\n' > "$DNS_CONF"
+chmod 600 "$DNS_CONF"
 export_dns_env
 # shellcheck disable=SC2154
 [[ "$DNS_PROVIDER" == cf && "$CF_Token" == test-token ]]

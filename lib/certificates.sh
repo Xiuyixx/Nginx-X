@@ -1,10 +1,110 @@
 #!/usr/bin/env bash
 # Nginx-X certificate issuance and renewal helpers.
+nx_state_read() {
+  local file="$1" key="$2"
+  python3 - "$file" "$key" <<'PYSTATE'
+import os, re, stat, sys
+
+path, wanted = sys.argv[1:]
+allowed = {'ACME_EMAIL', 'DNS_PROVIDER', 'DNS_KEY1', 'DNS_KEY2'}
+if wanted not in allowed:
+    raise SystemExit('unsupported state key')
+try:
+    st = os.lstat(path)
+except OSError as exc:
+    raise SystemExit(str(exc))
+uid = os.geteuid()
+if (not stat.S_ISREG(st.st_mode) or stat.S_ISLNK(st.st_mode) or
+        st.st_uid != uid or st.st_nlink != 1 or st.st_mode & 0o077):
+    raise SystemExit('unsafe state file permissions or type')
+parent = os.path.dirname(os.path.abspath(path))
+while True:
+    try:
+        pst = os.lstat(parent)
+    except OSError as exc:
+        raise SystemExit(str(exc))
+    writable_sticky_tmp = (pst.st_mode & stat.S_ISVTX and pst.st_uid == 0)
+    if (stat.S_ISLNK(pst.st_mode) or not stat.S_ISDIR(pst.st_mode) or
+            pst.st_uid not in (0, uid) or
+            (pst.st_mode & 0o022 and not writable_sticky_tmp)):
+        raise SystemExit('unsafe state directory')
+    if parent == '/':
+        break
+    parent = os.path.dirname(parent)
+
+def decode_q(value):
+    # Decode the subset emitted by Bash printf %q without evaluating it.
+    if value.startswith("$'"):
+        if len(value) < 3 or not value.endswith("'"):
+            raise ValueError('unterminated ANSI-C value')
+        body = value[2:-1]
+        out = []
+        i = 0
+        while i < len(body):
+            if body[i] != '\\':
+                out.append(body[i]); i += 1; continue
+            i += 1
+            if i >= len(body): raise ValueError('trailing escape')
+            c = body[i]; i += 1
+            simple = {'a':'\a', 'b':'\b', 'e':'\x1b', 'f':'\f', 'n':'\n',
+                      'r':'\r', 't':'\t', 'v':'\v', '\\':'\\', "'":"'"}
+            if c in simple:
+                out.append(simple[c]); continue
+            if c in 'xXuU':
+                width = {'x':2, 'X':2, 'u':4, 'U':8}[c]
+                digits = body[i:i+width]
+                if len(digits) != width or not re.fullmatch(r'[0-9a-fA-F]+', digits):
+                    raise ValueError('invalid escape')
+                out.append(chr(int(digits, 16))); i += width; continue
+            if c in '01234567':
+                digits = c
+                while i < len(body) and len(digits) < 3 and body[i] in '01234567':
+                    digits += body[i]; i += 1
+                out.append(chr(int(digits, 8))); continue
+            out.append(c)
+        return ''.join(out)
+    out = []
+    i = 0
+    while i < len(value):
+        if value[i] == '\\':
+            i += 1
+            if i >= len(value): raise ValueError('trailing escape')
+            out.append(value[i]); i += 1
+        else:
+            out.append(value[i]); i += 1
+    return ''.join(out)
+
+found = {}
+with open(path, encoding='utf-8', newline='') as stream:
+    for raw in stream:
+        line = raw.rstrip('\n')
+        if not line or line.startswith('#'):
+            continue
+        match = re.fullmatch(r'([A-Za-z_][A-Za-z0-9_]*)=(.*)', line)
+        if not match or match[1] not in allowed or match[1] in found:
+            raise SystemExit('invalid state file')
+        value = decode_q(match[2])
+        if '\n' in value or '\r' in value:
+            raise SystemExit('newline is not allowed in state values')
+        found[match[1]] = value
+if wanted in found:
+    sys.stdout.write(found[wanted])
+PYSTATE
+}
+
 load_dns_conf() {
   ensure_state_dir
+  unset DNS_PROVIDER DNS_KEY1 DNS_KEY2
   if [[ -f "$DNS_CONF" ]]; then
-    # shellcheck disable=SC1090
-    . "$DNS_CONF"
+    DNS_PROVIDER="$(nx_state_read "$DNS_CONF" DNS_PROVIDER)" || {
+      error "DNS API 配置文件格式或权限不安全：${DNS_CONF}"; return 1;
+    }
+    DNS_KEY1="$(nx_state_read "$DNS_CONF" DNS_KEY1)" || {
+      error "DNS API 配置文件格式或权限不安全：${DNS_CONF}"; return 1;
+    }
+    DNS_KEY2="$(nx_state_read "$DNS_CONF" DNS_KEY2)" || {
+      error "DNS API 配置文件格式或权限不安全：${DNS_CONF}"; return 1;
+    }
   fi
   case "${DNS_PROVIDER:-}" in
     cloudflare) DNS_PROVIDER=cf ;; dnspod) DNS_PROVIDER=dp ;;
@@ -19,6 +119,9 @@ save_dns_conf() {
   local key1="$2"
   local key2="$3"
   local tmp parent
+  [[ "$provider$key1$key2" != *$'\n'* && "$provider$key1$key2" != *$'\r'* ]] || {
+    error "DNS API 配置不能包含换行。"; return 1;
+  }
   ensure_state_dir || { error "无法准备 DNS API 配置目录。"; return 1; }
   parent="$(dirname "$DNS_CONF")" || return 1
   # Stage beside the destination: failures never truncate existing credentials.
@@ -341,15 +444,20 @@ _issue_cert_http() (
 
 load_email() {
   ensure_state_dir
+  unset ACME_EMAIL
   if [[ -f "$EMAIL_CONF" ]]; then
-    # shellcheck disable=SC1090
-    . "$EMAIL_CONF"
+    ACME_EMAIL="$(nx_state_read "$EMAIL_CONF" ACME_EMAIL)" || {
+      error "邮箱配置文件格式或权限不安全：${EMAIL_CONF}"; return 1;
+    }
   fi
 }
 
 save_email() {
   local email="$1"
   local parent tmp
+  [[ "$email" != *$'\n'* && "$email" != *$'\r'* ]] || {
+    error "邮箱配置不能包含换行。"; return 1;
+  }
   ensure_state_dir || { error "无法准备邮箱配置目录。"; return 1; }
   parent="$(dirname "$EMAIL_CONF")" || return 1
   [[ ! -L "$EMAIL_CONF" && ( ! -e "$EMAIL_CONF" || -f "$EMAIL_CONF" ) ]] || {

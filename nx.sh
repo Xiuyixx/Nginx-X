@@ -15,7 +15,7 @@ NC='\033[0m'
 
 # ---------- 全局变量 ----------
 APP_NAME="Nginx-X"
-APP_VERSION="3.4.16"
+APP_VERSION="3.4.17"
 # Alpine 的 nginx 把 server 配置放在 http.d，其他系统用 conf.d
 if [[ -f /etc/nginx/http.d ]] || [[ -d /etc/nginx/http.d ]]; then
   CONF_DIR="/etc/nginx/http.d"
@@ -966,8 +966,11 @@ valid_ipv4_host() {
 
   local octet
   for octet in "${octets[@]}"; do
-    [[ "$octet" =~ ^[0-9]+$ ]] || return 1
-    (( octet >= 0 && octet <= 255 )) || return 1
+    # Keep input canonical and force base-10 arithmetic.  Bash treats a
+    # leading zero as octal, so values such as 08 used to emit an arithmetic
+    # error while oversized values could wrap and pass the range check.
+    [[ "$octet" =~ ^(0|[1-9][0-9]{0,2})$ ]] || return 1
+    (( 10#$octet <= 255 )) || return 1
   done
 }
 
@@ -978,7 +981,9 @@ valid_server_name_input() {
 
 valid_port() {
   local p="$1"
-  [[ "$p" =~ ^[0-9]+$ ]] && (( p >= 1 && p <= 65535 ))
+  # Accept only canonical decimal input and bound the width before using
+  # Bash arithmetic; this avoids octal interpretation and integer overflow.
+  [[ "$p" =~ ^[1-9][0-9]{0,4}$ ]] && (( 10#$p <= 65535 ))
 }
 
 valid_url() {
@@ -1850,7 +1855,11 @@ nx_modify_conf_from_snapshot() {
     new_target="$src"
   else
     new_target="$(conf_target_path "$new_domain" "$new_listen")"
-    [[ "$src" == *.conf.bak ]] && new_target="${new_target}.bak"
+    # Any suffix after .conf denotes a disabled managed entry (the list
+    # intentionally supports .conf.* rather than only .conf.bak). Preserve
+    # that state when the identity changes; otherwise a parameter edit would
+    # silently re-enable the site.
+    [[ "$src" != *.conf ]] && new_target="${new_target}.bak"
   fi
   apply_conf_with_rollback "$tmp" "$new_target" "$src" || return 1
   info "配置已修改，保留原协议与启停状态。"

@@ -17,6 +17,7 @@ for entry in ./nx.sh "$root/bundle"; do
     # real interactive caller; no success message may be emitted.
     rm -f "$EMAIL_CONF"
     printf 'ACME_EMAIL=old@example.com\n' > "$EMAIL_CONF"
+    chmod 600 "$EMAIL_CONF"
     output="$root/email-$(basename "$entry").log"
     printf() {
       if [[ ${1:-} == 'ACME_EMAIL=%q\n' ]]; then return 1; fi

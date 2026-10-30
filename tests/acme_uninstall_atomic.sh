@@ -34,7 +34,7 @@ setup() {
   printf 'a.example\nb.example\n' > "$NX_ACME_MANIFEST"
   printf keep > "$NX_ACME_DISPATCH"
   printf secret > "$DNS_CONF"; chmod 600 "$DNS_CONF"
-  printf email > "$EMAIL_CONF"
+  printf email > "$EMAIL_CONF"; chmod 600 "$EMAIL_CONF"
   printf 'events {}\nhttp { include %s/*.conf; }\n' "$CONF_DIR" > "$NGINX_MAIN_CONF"
   for domain in a.example b.example other.example; do
     mkdir -p "$SSL_DIR/$domain" "$HOME/.acme.sh/$domain"

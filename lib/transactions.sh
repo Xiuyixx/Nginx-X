@@ -399,6 +399,31 @@ nx_assert_new_target() {
   [[ ! -e "$base" && ! -L "$base" && ! -e "$base.bak" && ! -L "$base.bak" ]] || {
     error "站点配置已存在（包括停用配置），请使用修改菜单。"; return 1;
   }
+
+  # The filename is not the site identity: HTTPS resaves can retain a
+  # historical HTTP filename, and disabled files remain outside the active
+  # *.conf include while still representing the same managed site.  Reject a
+  # new domain/port pair when any existing configuration (enabled, disabled,
+  # or helper) already advertises that pair, including case/trailing-dot
+  # variants normalized by nx_conf_query.
+  local name requested_domain requested_port file keys
+  name="${base##*/}"
+  name="${name%.conf}"
+  [[ "$name" == *-* ]] || return 0
+  requested_domain="${name%-*}"
+  requested_port="${name##*-}"
+  [[ "$requested_domain" != "$name" && "$requested_port" =~ ^[1-9][0-9]{0,4}$ ]] || return 0
+  requested_port=$((10#$requested_port))
+  for file in "$CONF_DIR"/*.conf "$CONF_DIR"/*.conf.*; do
+    [[ -f "$file" && "$file" != "$1" ]] || continue
+    keys="$(nx_conf_query keys "$file")" || {
+      error "无法确认现有配置身份，拒绝新增站点：$file"; return 1;
+    }
+    if awk -F'|' -v domain="${requested_domain,,}" -v port="$requested_port" \
+      '$1 == domain { n=$2; sub(/^.*:/, "", n); if (n == port) found=1 } END { exit !found }' <<< "$keys"; then
+      error "同域名和监听端口的配置已存在（包括停用配置）：$file"; return 1
+    fi
+  done
 }
 
 # Render TLS before publication. Never activate a temporary plain-text version.

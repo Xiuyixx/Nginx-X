@@ -1,6 +1,6 @@
 # Nginx-X
 
-![Version](https://img.shields.io/badge/version-3.4.16-blue)
+![Version](https://img.shields.io/badge/version-3.4.17-blue)
 
 基于 Bash 的 Nginx 交互式管理工具，面向 Ubuntu、Debian、CentOS/RHEL、Alpine 和 OpenWrt。通过数字菜单完成 Nginx 安装升级、反向代理、证书、访问策略、运行检查和安全卸载；所有受管配置变更都会先校验，再尝试重载，失败时恢复事务范围内的文件。
 

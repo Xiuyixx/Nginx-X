@@ -44,7 +44,7 @@ for entry in "$PWD/nx.sh" "$root/bundle"; do
   rm -f "$CONF_DIR/new.example-18443.conf" "$root/reloads"
   printf 'server { listen broken ssl; server_name old.example; }\n' > "$CONF_DIR/old.conf"
   if "$action" <<< $'new.example\n18443\n'"$backend" > "$root/out" 2>&1; then exit 1; fi
-  grep -q '无法解析现有 TLS 监听' "$root/out"
+  grep -Eq '无法解析现有 TLS 监听|无法确认现有配置身份' "$root/out"
   [[ ! -e "$CONF_DIR/new.example-18443.conf" && ! -e "$root/reloads" ]]
  done
  rm -f "$CONF_DIR"/*

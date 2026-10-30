@@ -16,6 +16,7 @@ nx_acme_privileged_paths
 mkdir -p "$HOME/.acme.sh/b.example_ecc" "$NX_TEST_ENV_ROOT/custom"
 printf cert > "$HOME/.acme.sh/b.example_ecc/fullchain.pem"
 printf secret > "$DNS_CONF"
+chmod 600 "$DNS_CONF"
 : > "$NX_ACME_MANIFEST"
 # Any destructive operation is a test failure: the preflight must refuse.
 # shellcheck disable=SC2317
