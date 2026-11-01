@@ -416,6 +416,10 @@ nx_assert_new_target() {
   requested_port=$((10#$requested_port))
   for file in "$CONF_DIR"/*.conf "$CONF_DIR"/*.conf.*; do
     [[ -f "$file" && "$file" != "$1" ]] || continue
+    # Generated helpers (status page, websocket map, domain-only fallback, ACME
+    # challenge route) are not sites: a retained port-80 challenge route for a
+    # deleted site must not block recreating that domain and port.
+    nx_managed_conf_is_helper "$file" && continue
     keys="$(nx_conf_query keys "$file")" || {
       error "无法确认现有配置身份，拒绝新增站点：$file"; return 1;
     }

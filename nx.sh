@@ -15,7 +15,7 @@ NC='\033[0m'
 
 # ---------- 全局变量 ----------
 APP_NAME="Nginx-X"
-APP_VERSION="3.4.18"
+APP_VERSION="3.4.19"
 # Alpine 的 nginx 把 server 配置放在 http.d，其他系统用 conf.d
 if [[ -f /etc/nginx/http.d ]] || [[ -d /etc/nginx/http.d ]]; then
   CONF_DIR="/etc/nginx/http.d"
@@ -2108,6 +2108,10 @@ _scan_unmanaged_confs() {
       grep -qE '^[[:space:]]*server[[:space:]]*\{' "$conf" 2>/dev/null || continue
       # 跳过已纳管的
       grep -q '^# managed_by=Nginx-X$' "$conf" 2>/dev/null && continue
+      # 跳过 Nginx-X 自己生成的辅助配置（状态页、WebSocket map、仅域名兜底、
+      # ACME 校验路由）。删除站点后保留的 acme-challenge-<域名>.conf 没有纳管头，
+      # 但它不是业务站点，导入会把已删除的站点“找回来”。
+      nx_managed_conf_is_helper "$conf" && continue
       # 跳过 nginx 默认/状态配置
       local base; base="$(basename "$conf")"
       [[ "$base" == default || "$base" == default.conf || "$base" == default.conf.* || "$base" == nginx_status.conf || "$base" == 00-nx-domain-only.conf ]] && continue
