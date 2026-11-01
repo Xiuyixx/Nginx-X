@@ -150,6 +150,12 @@ nx_write_conf() {
   local tmp="$1" target="$2" old="${3:-}"
   nx_conf_path_allowed "$target" || return 1
   [[ -z "$old" ]] || nx_conf_path_allowed "$old" || return 1
+  if [[ -n "$old" && "$old" != "$target" ]]; then
+    # The filename may be historical after HTTPS conversion. Recheck the
+    # candidate's normalized domain/port against every managed file, not just
+    # the target pathname, before publishing a rename.
+    nx_assert_new_target "$target" "$old" || return 1
+  fi
   if [[ -n "$old" && "$old" != "$target" && ( -e "$target" || -e "${target%.bak}.bak" && "${target%.bak}.bak" != "$old" || -e "${target%.bak}" && "${target%.bak}" != "$old" ) ]]; then
     error "目标配置已存在，拒绝覆盖：${target}"
     return 1
@@ -357,9 +363,51 @@ nx_site_https_menu() {
   esac
 }
 
+nx_import_publish() {
+  local tmp="$1" target="$2" source="${3:-}" source_key="${4:-}"
+  local actual keys
+  [[ "$source_key" =~ ^[0-9a-f]{64}$ ]] || return 1
+  actual="$(nx_import_source_key "$source")" || return 1
+  [[ "$actual" == "$source_key" ]] || { error "导入源文件已变化，请重新扫描。"; return 1; }
+  nx_assert_single_link "$source" || return 1
+  keys="$(nx_conf_query keys "$tmp")" || return 1
+  nx_import_identity_conflict "$source" "$keys" || return 1
+  nx_conf_path_allowed "$target" || return 1
+  [[ ! -e "$target.bak" && ! -L "$target.bak" ]] || { error "同名停用站点已存在。"; return 1; }
+  [[ -f "$tmp" && ! -L "$tmp" ]] || return 1
+  [[ ! -e "$target" || "$target" == "$source" ]] || {
+    error "目标配置已存在，拒绝覆盖：$target"; return 1;
+  }
+  nx_acme_retain_conf_route "$source" || return 1
+  if [[ "$source" == "$CONF_DIR/"* ]]; then
+    nx_conf_path_allowed "$source" || return 1
+    if [[ "$source" != "$target" ]]; then ${SUDO} cp -a -- "$source" "$target" || return 1; fi
+    ${SUDO} tee "$target" < "$tmp" >/dev/null || return 1
+  else
+    install_managed_file "$tmp" "$target" || return 1
+  fi
+  # Recheck after publication as well as before it.  If an external source
+  # changed while the transaction was preparing, roll back the target rather
+  # than hiding the newer source behind a stale managed identity.
+  if [[ "$source" != "$CONF_DIR/"* ]]; then
+    actual="$(nx_import_source_key "$source")" || return 1
+    [[ "$actual" == "$source_key" ]] || { error "导入源文件在发布期间发生变化，已回滚；请重新扫描。"; return 1; }
+  fi
+  if [[ -n "$source" && "$source" != "$target" && "$source" == "$CONF_DIR/"* ]]; then
+    nx_conf_path_allowed "$source" || return 1
+    ${SUDO} rm -f -- "$source" || return 1
+  fi
+  ensure_ssl_directives_present "$target"
+}
+
 nx_remove_conf() {
   nx_conf_path_allowed "$1" || return 1
   nx_acme_retain_conf_route "$1" || return 1
+  local source_key
+  source_key="$(conf_meta_get "$1" import_source_key)" || return 1
+  if [[ -n "$source_key" ]]; then
+    nx_import_tombstone_add "$source_key" || return 1
+  fi
   ${SUDO} rm -f "$1"
 }
 
@@ -415,7 +463,7 @@ nx_assert_new_target() {
   [[ "$requested_domain" != "$name" && "$requested_port" =~ ^[1-9][0-9]{0,4}$ ]] || return 0
   requested_port=$((10#$requested_port))
   for file in "$CONF_DIR"/*.conf "$CONF_DIR"/*.conf.*; do
-    [[ -f "$file" && "$file" != "$1" ]] || continue
+    [[ -f "$file" && "$file" != "$1" && "$file" != "${2:-}" ]] || continue
     # Generated helpers (status page, websocket map, domain-only fallback, ACME
     # challenge route) are not sites: a retained port-80 challenge route for a
     # deleted site must not block recreating that domain and port.

@@ -15,7 +15,7 @@ NC='\033[0m'
 
 # ---------- 全局变量 ----------
 APP_NAME="Nginx-X"
-APP_VERSION="3.4.19"
+APP_VERSION="3.4.20"
 # Alpine 的 nginx 把 server 配置放在 http.d，其他系统用 conf.d
 if [[ -f /etc/nginx/http.d ]] || [[ -d /etc/nginx/http.d ]]; then
   CONF_DIR="/etc/nginx/http.d"
@@ -1678,13 +1678,104 @@ nx_managed_conf_is_helper() {
   local file="$1" base domain
   base="${file##*/}"
   case "$base" in
-    nginx_status.conf*|00-websocket-map.conf*|00-nx-domain-only.conf*) return 0 ;;
-    acme-challenge-*.conf*)
-      domain="${base#acme-challenge-}"; domain="${domain%%.conf*}"
+    nginx_status.conf|00-websocket-map.conf|00-nx-domain-only.conf) return 0 ;;
+    nginx_status.conf.*|00-websocket-map.conf.*|00-nx-domain-only.conf.*)
+      [[ "$base" != *.conf ]]; return $? ;;
+    acme-challenge-*.conf)
+      domain="${base#acme-challenge-}"; domain="${domain%.conf}"
+      valid_domain "$domain" && nx_acme_helper_owned "$file" "$domain"
+      return $? ;;
+    acme-challenge-*.conf.*)
+      # A manually disabled helper may carry a suffix; remove only the final
+      # helper extension, not an earlier domain label such as .config.
+      domain="${base#acme-challenge-}"; domain="${domain%.conf.*}"
       valid_domain "$domain" && nx_acme_helper_owned "$file" "$domain"
       return $? ;;
   esac
   return 1
+}
+
+# A deleted imported site must not resurrect its unchanged source file on the
+# next import scan.  The key includes the canonical path and source bytes, so
+# a later edit intentionally makes the source discoverable again.
+nx_import_source_key() {
+  python3 - "$1" <<'PYIMPORTKEY'
+import hashlib, os, pathlib, sys
+path = pathlib.Path(sys.argv[1])
+real = os.path.realpath(path)
+with path.open('rb') as source:
+    data = source.read()
+print(hashlib.sha256(real.encode() + b'\0' + data).hexdigest())
+PYIMPORTKEY
+}
+
+nx_import_tombstone_contains() {
+  local key="$1" store="$CONF_DIR/.nx-import-tombstones"
+  [[ "$key" =~ ^[0-9a-f]{64}$ ]] || return 2
+  ${SUDO} python3 - "$store" "$key" <<'PYTOMBSTONE'
+import os, re, stat, sys
+path, key = sys.argv[1:]
+try:
+    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+except FileNotFoundError:
+    sys.exit(1)
+except OSError:
+    sys.exit(2)
+try:
+    st = os.fstat(fd)
+    if not stat.S_ISREG(st.st_mode) or st.st_nlink != 1: sys.exit(2)
+    with os.fdopen(fd, encoding='ascii') as source: lines = source.read().splitlines()
+    if any(not re.fullmatch('[0-9a-f]{64}', line) for line in lines): sys.exit(2)
+    sys.exit(0 if key in lines else 1)
+except (OSError, UnicodeError):
+    sys.exit(2)
+PYTOMBSTONE
+}
+
+nx_import_tombstone_add() {
+  local key="$1" store="$CONF_DIR/.nx-import-tombstones" tmp
+  [[ "$key" =~ ^[0-9a-f]{64}$ ]] || return 1
+  if nx_import_tombstone_contains "$key"; then return 0; else
+    local tomb_rc=$?
+    [[ "$tomb_rc" == 1 ]] || return 1
+  fi
+  if [[ -e "$store" || -L "$store" ]]; then
+    [[ -f "$store" && ! -L "$store" ]] || { error "导入来源记录不是普通文件：$store"; return 1; }
+  fi
+  tmp="$(mktemp /tmp/nginxx-import-tombstones-XXXXXX)" || return 1
+  if [[ -f "$store" ]]; then
+    ${SUDO} cat -- "$store" > "$tmp" || { rm -f "$tmp"; return 1; }
+  fi
+  printf '%s\n' "$key" >> "$tmp" || { rm -f "$tmp"; return 1; }
+  ${SUDO} install -m 0600 "$tmp" "$store" || { rm -f "$tmp"; return 1; }
+  rm -f "$tmp"
+}
+
+# Backups and disabled source files must never be silently activated by import.
+nx_import_candidate_is_backup() {
+  case "${1##*/}" in
+    *.conf) return 1 ;;
+    *.conf.*|*.bak|*.old|*.orig|*.save|*.disabled|*~) return 0 ;;
+  esac
+  return 1
+}
+
+nx_import_identity_conflict() {
+  local candidate="$1" candidate_keys="$2" managed keys key
+  candidate_keys="$(awk -F'|' 'NF==2 {sub(/^.*:/,"",$2); print $1 "|" $2}' <<< "$candidate_keys")" || return 1
+  while IFS= read -r managed; do
+    [[ -f "$managed" && "$managed" != "$candidate" ]] || continue
+    keys="$(nx_conf_query keys "$managed")" || return 1
+    keys="$(awk -F'|' 'NF==2 {sub(/^.*:/,"",$2); print $1 "|" $2}' <<< "$keys")" || return 1
+    while IFS= read -r key; do
+      [[ -n "$key" ]] || continue
+      if grep -Fxq -- "$key" <<< "$candidate_keys"; then
+        error "同域名和监听端口的配置已由 Nginx-X 纳管：$managed"
+        return 2
+      fi
+    done <<< "$keys"
+  done < <(list_managed_conf_files 1)
+  return 0
 }
 
 list_managed_conf_files() {
@@ -2082,30 +2173,32 @@ config_manage_menu() {
 
 # 扫描目录，返回未被 Nginx-X 管理的 .conf 文件（去重）
 _scan_unmanaged_confs() {
-  local -A seen
+  local -A seen seen_keys seen_inodes
+  local -a candidates=()
   # 预建已纳管域名-端口索引（含停用的 .bak 等），用于去重
   local -A managed_index
   local _f key keys
   for _f in "${CONF_DIR}"/*.conf "${CONF_DIR}"/*.conf.*; do
     [[ -f "$_f" ]] || continue
     grep -q '^# managed_by=Nginx-X$' "$_f" 2>/dev/null || continue
+    nx_managed_conf_is_helper "$_f" && continue
     keys="$(nx_conf_query keys "$_f")" || continue
+    keys="$(awk -F'|' 'NF==2 {sub(/^.*:/,"",$2); print $1 "|" $2}' <<< "$keys")" || continue
     while IFS= read -r key; do [[ -z "$key" ]] || managed_index["$key"]=1; done <<< "$keys"
   done
 
   local dirs=(
     "$CONF_DIR"
-    "/etc/nginx/sites-enabled"
-    "/etc/nginx/sites-available"
+    "${NX_SITES_ENABLED_DIR:-/etc/nginx/sites-enabled}"
+    "${NX_SITES_AVAILABLE_DIR:-/etc/nginx/sites-available}"
   )
-  local dir conf real_path
+  local dir conf real_path source_key inode
 
   for dir in "${dirs[@]}"; do
     [[ -d "$dir" ]] || continue
     for conf in "$dir"/*.conf "$dir"/*; do
       [[ -f "$conf" ]] || continue
-      # 只处理看起来像 nginx 配置的文件（含 server 块）
-      grep -qE '^[[:space:]]*server[[:space:]]*\{' "$conf" 2>/dev/null || continue
+      nx_import_candidate_is_backup "$conf" && continue
       # 跳过已纳管的
       grep -q '^# managed_by=Nginx-X$' "$conf" 2>/dev/null && continue
       # 跳过 Nginx-X 自己生成的辅助配置（状态页、WebSocket map、仅域名兜底、
@@ -2117,18 +2210,35 @@ _scan_unmanaged_confs() {
       [[ "$base" == default || "$base" == default.conf || "$base" == default.conf.* || "$base" == nginx_status.conf || "$base" == 00-nx-domain-only.conf ]] && continue
       # 通过 realpath 去重（sites-enabled 软链接 → sites-available）
       real_path="$(realpath "$conf" 2>/dev/null || echo "$conf")"
+      nx_import_candidate_is_backup "$real_path" && continue
+      nx_managed_conf_is_helper "$real_path" && continue
       [[ -n "${seen[$real_path]:-}" ]] && continue
       seen["$real_path"]="$conf"
-      # 检查是否已有同域名-端口的纳管配置（包括停用的）
+      inode="$(stat -Lc '%d:%i' -- "$conf")" || continue
+      [[ -z "${seen_inodes[$inode]:-}" ]] || continue
+      seen_inodes["$inode"]=1
+      source_key="$(nx_import_source_key "$real_path")" || continue
+      if nx_import_tombstone_contains "$source_key"; then
+        continue
+      else
+        local tomb_rc=$?
+        [[ "$tomb_rc" == 1 ]] || { error "导入来源记录不可读取，已停止扫描：$CONF_DIR/.nx-import-tombstones" >&2; return 1; }
+      fi
+      # 检查已纳管（包括停用的）及本轮已列出的站点身份。
       local duplicate=0
       keys="$(nx_conf_query keys "$conf")" || continue
+      [[ -n "$keys" ]] || continue
+      keys="$(awk -F'|' 'NF==2 {sub(/^.*:/,"",$2); print $1 "|" $2}' <<< "$keys")" || continue
       while IFS= read -r key; do
-        if [[ -n "$key" && -n "${managed_index[$key]:-}" ]]; then duplicate=1; fi
+        if [[ -n "$key" && ( -n "${managed_index[$key]:-}" || -n "${seen_keys[$key]:-}" ) ]]; then duplicate=1; fi
       done <<< "$keys"
       (( duplicate == 0 )) || continue
-      echo "$conf"
+      while IFS= read -r key; do [[ -z "$key" ]] || seen_keys["$key"]=1; done <<< "$keys"
+      candidates+=("$conf")
     done
   done
+  if (( ${#candidates[@]} )); then printf '%s\n' "${candidates[@]}"; fi
+  return 0
 }
 
 # 从现有 conf 中提取元数据
@@ -2163,7 +2273,18 @@ import_single_conf() {
   local conf="$1"
   local meta domain listen_port backend_url https_enabled mode
   local target_name target_path tmp
-  local real_conf
+  local real_conf source_key candidate_keys
+
+  nx_import_candidate_is_backup "$conf" && { error "备份/停用文件不会自动启用，请先人工迁移为活动配置。"; return 1; }
+  nx_managed_conf_is_helper "$conf" && { error "辅助配置不是可导入的业务站点。"; return 1; }
+  real_conf="$(realpath -e -- "$conf")" || return 1
+  nx_import_candidate_is_backup "$real_conf" && { error "备份/停用来源不能通过链接导入。"; return 1; }
+  nx_managed_conf_is_helper "$real_conf" && { error "辅助配置不是可导入的业务站点。"; return 1; }
+  grep -q '^# managed_by=Nginx-X$' "$real_conf" && { error "该配置已由 Nginx-X 纳管。"; return 1; }
+  nx_assert_single_link "$real_conf" || return 1
+  source_key="$(nx_import_source_key "$real_conf")" || return 1
+  candidate_keys="$(nx_conf_query keys "$real_conf")" || return 1
+  nx_import_identity_conflict "$real_conf" "$candidate_keys" || return 1
 
   meta="$(_extract_conf_meta "$conf")" || return 1
   IFS='|' read -r domain listen_port backend_url https_enabled mode <<< "$meta"
@@ -2189,6 +2310,8 @@ import_single_conf() {
   meta_header+="# listen_port=${listen_port}"
   meta_header+=$'\n'
   meta_header+="# imported=true"
+  meta_header+=$'\n'
+  meta_header+="# import_source_key=${source_key}"
   if [[ -n "$backend_url" ]]; then
     local backend_port
     backend_port="$(url_explicit_port "$backend_url")"
@@ -2210,24 +2333,25 @@ import_single_conf() {
   meta_header+=$'\n'
 
   # 生成新配置（元数据头 + 原始内容）
-  tmp="$(mktemp /tmp/nginxx-import-XXXXXX)"
-  {
-    echo "$meta_header"
-    cat "$conf"
-  } > "$tmp"
-
-  real_conf="$(realpath "$conf" 2>/dev/null || echo "$conf")"
+  tmp="$(mktemp /tmp/nginxx-import-XXXXXX)" || return 1
+  if ! printf '%s\n' "$meta_header" > "$tmp" || ! nx_conf_query metadata-drop "$real_conf" \
+      managed_by domain listen_port imported import_source_key backend_port mode upstream_url https_enabled >> "$tmp"; then
+    rm -f "$tmp"
+    return 1
+  fi
 
   if [[ "$real_conf" == "${CONF_DIR}/"* ]]; then
-    if [[ "$real_conf" != "$target_path" && -e "$target_path" ]]; then target_path="$real_conf"; fi
-    if ! apply_conf_with_rollback "$tmp" "$target_path" "$real_conf"; then
+    if [[ "$real_conf" != "$target_path" && ( -e "$target_path" || -L "$target_path" ) ]]; then
+      rm -f "$tmp"; error "目标配置已存在，拒绝覆盖。"; return 1
+    fi
+    if ! nx_transaction nx_import_publish "$tmp" "$target_path" "$real_conf" "$source_key"; then
       rm -f "$tmp"
       return 1
     fi
   else
     [[ ! -e "$target_path" ]] || { rm -f "$tmp"; error "目标配置已存在。"; return 1; }
     local enabled_link link_target
-    for enabled_link in /etc/nginx/sites-enabled/*; do
+    for enabled_link in "${NX_SITES_ENABLED_DIR:-/etc/nginx/sites-enabled}"/*; do
       [[ -L "$enabled_link" ]] || continue
       link_target="$(realpath "$enabled_link" 2>/dev/null || true)"
       if [[ "$link_target" == "$real_conf" ]]; then
@@ -2236,8 +2360,7 @@ import_single_conf() {
         return 1
       fi
     done
-    if ! apply_conf_with_rollback "$tmp" "$target_path"; then
-      reload_nginx_safe >/dev/null 2>&1 || true
+    if ! nx_transaction nx_import_publish "$tmp" "$target_path" "$real_conf" "$source_key"; then
       rm -f "$tmp"
       return 1
     fi
@@ -2251,7 +2374,9 @@ import_single_conf() {
 
 import_existing_confs() {
   local -a unmanaged
-  mapfile -t unmanaged < <(_scan_unmanaged_confs)
+  local scan
+  scan="$(_scan_unmanaged_confs)" || return 1
+  if [[ -n "$scan" ]]; then mapfile -t unmanaged <<< "$scan"; else unmanaged=(); fi
 
   if [[ ${#unmanaged[@]} -eq 0 ]]; then
     info "未发现需要导入的已有配置。"
@@ -2262,7 +2387,7 @@ import_existing_confs() {
   info "发现 ${#unmanaged[@]} 个未纳管的 Nginx 配置："
   echo ""
 
-  local conf meta domain listen_port rest imported=0
+  local conf meta domain listen_port rest imported=0 failed=0
   for conf in "${unmanaged[@]}"; do
     meta="$(_extract_conf_meta "$conf")" || return 1
     IFS='|' read -r domain listen_port rest <<< "$meta"
@@ -2273,6 +2398,8 @@ import_existing_confs() {
     if confirm "    是否导入此配置？"; then
       if import_single_conf "$conf"; then
         ((imported+=1))
+      else
+        failed=1
       fi
     else
       info "    已跳过。"
@@ -2282,14 +2409,16 @@ import_existing_confs() {
 
   if [[ $imported -gt 0 ]]; then
     info "共导入 ${imported} 个配置。"
-
   fi
+  return "$failed"
 }
 
 # 安装完成后自动检测并提示导入
 auto_import_after_install() {
   local -a unmanaged
-  mapfile -t unmanaged < <(_scan_unmanaged_confs)
+  local scan
+  scan="$(_scan_unmanaged_confs)" || return 1
+  if [[ -n "$scan" ]]; then mapfile -t unmanaged <<< "$scan"; else unmanaged=(); fi
   [[ ${#unmanaged[@]} -eq 0 ]] && return 0
 
   echo ""
