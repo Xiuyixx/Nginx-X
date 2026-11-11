@@ -1,6 +1,6 @@
 # Nginx-X
 
-![Version](https://img.shields.io/badge/version-3.4.20-blue)
+![Version](https://img.shields.io/badge/version-3.4.21-blue)
 
 基于 Bash 的 Nginx 交互式管理工具，面向 Ubuntu、Debian、CentOS/RHEL、Alpine 和 OpenWrt。通过数字菜单完成 Nginx 安装升级、反向代理、证书、访问策略、运行检查和安全卸载；所有受管配置变更都会先校验，再尝试重载，失败时恢复事务范围内的文件。
 
@@ -141,6 +141,14 @@ Nginx 未另行配置时默认请求体上限为 1 MiB，较长对话、工具�
 
 外部主上游与推流节点 URL 不支持固定查询参数（例如 `https://origin.example/api?fixed=1`），以免 Nginx 将它与客户端路径错误拼接；客户端请求本身的查询参数正常转发，显式 Referer URL 可带查询参数。已有此类上游配置不会自动改写，需根据业务语义手工配置，不能简单删掉鉴权参数。Emby Host 使用上游地址及非默认端口，IPv6 保留方括号；TLS 对 IP 字面量不发送 DNS SNI。
 
+### 外部上游 HTTPS 证书校验
+
+新建外部反代默认校验所有 HTTPS 主上游和推流节点的证书（`proxy_ssl_verify on`），并探测系统 CA bundle。向导输入 `on` 使用系统 CA，输入私有 CA PEM 文件的绝对路径使用自定义信任；只有明确输入 `off` 才关闭验证并显示风险警告。回车保留当前策略，EOF 取消操作。CA 路径不能包含空格或配置特殊字符，缺失/无效 CA 不会自动降级。
+
+同站点所有 HTTPS 上游共用信任 bundle；混合私有与公共 CA 时需提供合并后的 PEM 文件。策略和 CA 路径随修改、停用及前端 HTTPS 往返保留。该设置只控制 Nginx 到上游的 TLS，不替代客户端到 Nginx 的证书或应用鉴权。IP 字面量的名称匹配须符合实际 Nginx/OpenSSL 能力，推荐使用证书覆盖的 DNS 名称，不为连通性静默关闭校验。
+
+更新脚本不会改写存量站点。旧模板缺少上游校验指令时，安全重建检查可能拒绝“修改参数”；请备份后使用“编辑配置”逐个 HTTPS location 配置 `proxy_ssl_verify on`、可信 CA 与校验深度，或审查后重新创建站点。不能将更新脚本等同于所有旧站点已启用验证。
+
 ### 路径映射
 
 更新脚本后进入 **2) 配置管理 → 3) 配置列表 → 选择站点 → 6) 路径映射**。
@@ -188,7 +196,7 @@ CPA 安全部署建议：由用户自行将应用绑定 `127.0.0.1:8317`；同�
 
 **3) 高级设置** 保留：1 仅开启 Nginx 域名限制、2 修复/启用本机后端保护、3 解除本站后端引用、4 管理默认访问入口、0 返回。外部/静态站点及不支持的后端无法组合开启，明确失败并恢复原设置；可在高级设置确认仅 Nginx 限制，不宣称后端已保护。阻止浏览器 IP 访问不等于隐藏真实源站 IP，不做 CDN 配置。
 
-组合保护须以 root 启动脚本（例如 `sudo nx`），非 root 入口明确拒绝而不丢失 sudo 锁；strict-only 的关闭不依赖后端保护环境。首版只支持 **Linux + nftables + 运行中的 systemd**，安装器自动检测 `nft`、`ss`：apt/apk 使用 `nftables` + `iproute2`，dnf/yum 使用 `nftables` + `iproute`；只装缺失工具对应的包。最终安装维护脚本在私有 mount/network/PID namespace 中运行（软件源刷新/下载仍遵循管理员的原生包管理器 hooks），隔离 `/run`、服务管理器调用及防火墙，保留管理员 nft 配置和已有规则；缺少 namespace 权限、APT 事务涉及 init helper 变更或安装失败则明确非零拒绝，不退回普通不安全安装。包失败可能留下部分安装/待配置状态，需按包管理器报错修复后重试；不承诺包级回滚。旧 yum 必须具备 downloadonly 插件，否则明确失败。**无需启动/启用系统 `nftables.service`**（其默认配置/停止动作可能 flush 其他规则）；保护仅使用 Nginx-X 自有服务，在用户显式确认时才注册和修改规则。Alpine/OpenWrt 默认 init 不满足保护条件；不会安装/切换 systemd。OpenWrt/opkg 不猜测 nft/ss 包名、不自动安装后端工具；只有 Nginx 管理功能仍受支持。拒绝活动 UFW/firewalld/netfilter-persistent、未知或过早的 NAT 规则，不降级到仅 INPUT 或另一套 iptables。只接受活动纳管配置中所有实际代理目标均为静态 `http://127.0.0.1:端口`；外部、include、变量及复杂上游明确拒绝。核验真实 socket/进程及回环连接；22、sshd、Nginx 前端冲突、未知归属及无宿主监听（例如禁用 userland-proxy 的 Docker）拒绝，不猜测安全。
+组合保护须以 root 启动脚本（例如 `sudo nx`），非 root 入口明确拒绝而不丢失 sudo 锁；strict-only 的关闭不依赖后端保护环境。首版只支持 **Linux + nftables + 运行中的 systemd**，仅在用户显式确认启用后端保护后检测/准备 `nft`、`ss`，基础安装、更新和菜单启动不再为此安装可选工具：apt/apk 使用 `nftables` + `iproute2`，dnf/yum 使用 `nftables` + `iproute`；只装缺失工具对应的包。最终安装维护脚本在私有 mount/network/PID namespace 中运行（软件源刷新/下载仍遵循管理员的原生包管理器 hooks），隔离 `/run`、服务管理器调用及防火墙，保留管理员 nft 配置和已有规则；缺少 namespace 权限、APT 事务涉及 init helper 变更或安装失败则明确非零拒绝，不退回普通不安全安装。包失败可能留下部分安装/待配置状态，需按包管理器报错修复后重试；不承诺包级回滚。旧 yum 必须具备 downloadonly 插件，否则明确失败。**无需启动/启用系统 `nftables.service`**（其默认配置/停止动作可能 flush 其他规则）；保护仅使用 Nginx-X 自有服务，在用户显式确认时才注册和修改规则。Alpine/OpenWrt 默认 init 不满足保护条件；不会安装/切换 systemd。OpenWrt/opkg 不猜测 nft/ss 包名、不自动安装后端工具；只有 Nginx 管理功能仍受支持。拒绝活动 UFW/firewalld/netfilter-persistent、未知或过早的 NAT 规则，不降级到仅 INPUT 或另一套 iptables。只接受活动纳管配置中所有实际代理目标均为静态 `http://127.0.0.1:端口`；外部、include、变量及复杂上游明确拒绝。核验真实 socket/进程及回环连接；22、sshd、Nginx 前端冲突、未知归属及无宿主监听（例如禁用 userland-proxy 的 Docker）拒绝，不猜测安全。
 
 - 独立 `inet nginxx_backend_guard` 表在 DNAT 前阻断非 loopback、目的为本机的受保护 TCP 端口；覆盖 IPv4/IPv6 原生 INPUT 及常规 Docker 发布 DNAT/FORWARD 路径，不泛封路由转发同端口，不改其他表/全局 policy。
 - 保留本机 Nginx 的 `127.0.0.1` 连接，不改 CPA/sshd/Docker 绑定。**所有共享该端口的其他远端使用者也会被阻断**，不是按域名识别数据包。本机用户仍可直连，合法 Host/SNI 可伪造，应用鉴权不可移除。
@@ -203,6 +211,8 @@ CPA `*:8317` 且 Nginx 使用 `http://127.0.0.1:8317` 的原生进程符合候�
 访问策略只插入带标记的规则，HTTPS 开关保留应用 location、别名、代理目标及原有地址族，不重建自定义站点。解析无法确定的配置（例如隐藏 server 指令的 include、动态/正则域名、隐式监听、QUIC 或复杂多应用 server 文件）会明确拒绝自动修改，保留原文件；需先在编辑器中内联相关 include 或简化为可识别的 server 布局。普通“修改”仍是模板编辑器，导入或手工编辑站点需要使用“编辑”。
 
 已有证书且复用 HTTPS 监听端口时，新站点先在临时文件生成最终 TLS 配置再发布，不先开放明文业务。无证书的申请流程仍可能先创建 HTTP 站点，请根据业务需要选择 DNS 验证或先单独申请证书。
+
+重载验证会临时在主配置追加私有 notice 日志，核对目标 master 的新配置代际记录与已初始化 worker，然后恢复主配置原字节/权限；不向公网开放探针端口，不用 worker 自动补生冒充重载成功。日志位于 `/tmp/nginxx-generation-*/notice.log`，为避免运行中的 Nginx 日志重开失败而保留；成功恢复后不保留主配置副本。旧日志须在确认 Nginx 不再引用后清理。SIGKILL/断电仍不保证自动恢复，启动参数含 `-g 'pid ...'` 等无法安全确认的实例会拒绝而不是猜测。
 
 站点内容、默认设置、全局状态及派生拒绝配置在一次事务中生成，全部校验后只执行一次重载。失败时恢复原内容和权限并尝试加载原配置；如果恢复后的服务重载仍失败会明确提示，不能把服务管理器失败当作成功。事务拒绝硬链接配置及主配置/状态文件的硬链接，以免修改快照范围外别名；已有文件的保留式改写维持所有者/权限。事务使用进程锁串行处理 nx 写操作；手动编辑及其他程序不会遵守此锁，操作时仍应避免并行修改配置目录。
 
@@ -222,7 +232,7 @@ CPA `*:8317` 且 Nginx 使用 `http://127.0.0.1:8317` 的原生进程符合候�
 - 自动安装 acme.sh 并申请证书
 - **双验证模式**：交互式选择 HTTP-01 或 DNS-01（适配 NAT / 无 80 端口场景）
 - DNS-01 支持 Cloudflare、DNSPod、阿里云、HE.net、GoDaddy、华为云、AWS Route53、Google Cloud
-- DNS API 配置管理菜单（独立管理 Token，持久化存储）
+- DNS API 配置管理菜单（独立管理 Token，持久化存储）；秘密字段隐藏输入，普通 ID/用户名仍回显。凭据仅在 ACME DNS 签发子进程中注入，不再由菜单全局导出；持久文件仍按 `0600` 原子保存并安全解析。
 - HTTP-01 申请前自动执行自检（DNS/80监听/challenge 路径/域名回源），失败时给出更明确提示并支持切换 DNS-01 或强制继续
 - 自动续期每日检查，证书部署注册持久重载钩子；先校验 Nginx 配置再重载，失败明确报告
 - 启动时迁移当前 ACME 账户中由本工具管理的旧证书钩子和旧续期周期，不处理其他账户，也不擅自重开已关闭的调度
@@ -283,12 +293,13 @@ CPA `*:8317` 且 Nginx 使用 `http://127.0.0.1:8317` 的原生进程符合候�
 如果你希望"流量统计"更准确，可在 Nginx 主配置里增加类似：
 
 ```nginx
-log_format nginxx_host '$host $body_bytes_sent $remote_addr [$time_local] '
-                   '"$request" $status $http_referer "$http_user_agent"';
-access_log /var/log/nginx/access.host.log nginxx_host;
+log_format nx_host_v1 'nx1 $host $body_bytes_sent $server_port $scheme $server_name';
+access_log /var/log/nginx/access.host.log nx_host_v1;
 ```
 
-这样脚本会优先读取 `access.host.log`，按域名做更准确的请求数和下行统计。
+`log_format` 放在 `http` 上下文；`access_log` 可放在需要统计的 server 中，已有 location 级日志覆盖时还须显式配置。此六字段格式与统计器一致，按域名别名和监听端口聚合；旧式两字段 `host bytes` 仍兼容，但普通 combined 日志或包含额外字段的格式不能用于该统计。
+
+统计仅采样当前日志最近 5000 行，不是累计计费数据。日志轮转和可选状态入口见 [诊断与日志配置说明](docs/diagnostics.md)。
 
 ## 交互规范
 

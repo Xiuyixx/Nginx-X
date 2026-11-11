@@ -14,7 +14,30 @@ nx_backend_enable() {
   [[ "$policy" == strict ]] || { printf 'backend: strict active site required\n' >&2; return 1; }
   # No noninteractive environment variable can substitute for explicit consent.
   confirm "保护后端会安装 nftables/systemd 规则；本站必须先解除保护才能修改。这将阻断所有共享后端端口使用者的非回环入站（IPv4/IPv6），保留本机 nginx 回环连接；确认启用？" || return 10
+  nx_prepare_backend_dependencies || return 1
   _nx_backend_engine enable "$file" "$policy"
+}
+
+# Both explicit enable entries call this only after consent, before taking a
+# configuration snapshot. Package hooks must never run under the site lock.
+nx_prepare_backend_dependencies() {
+  # The base manager/installer/help/diagnostic paths never invoke this helper.
+  [[ "$(uname -s)" == Linux ]] || { error '后端保护仅支持 Linux；未执行任何安装。'; return 1; }
+  local manager
+  manager="$(detect_pkg_mgr 2>/dev/null || true)"
+  case "$manager" in
+    apt|dnf|yum|apk) ;;
+    *)
+      if ! nx_dependency_present nft || ! nx_dependency_present ss; then
+        error "当前平台不支持自动准备后端保护所需的 nft/ss；未执行任何安装。"
+        return 1
+      fi
+      ;;
+  esac
+  nx_ensure_backend_dependencies "$manager" || {
+    error '后端保护所需的 nft/ss 不可用；未启用保护。'
+    return 1
+  }
 }
 nx_backend_disable() {
   local file="${1:-}"

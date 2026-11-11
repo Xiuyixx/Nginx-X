@@ -7,12 +7,32 @@ if [[ ${NX_ACME_ISOLATED:-0} != 1 ]]; then
 fi
 [[ $EUID == 0 ]] || exit 1
 root="$(cd "$(dirname "$0")/.." && pwd)"
+# This test is intentionally run as root, but only inside the disposable
+# rootfs supplied by the caller.  Keep the daemon and all of its state on
+# paths that exist only in that rootfs.
+export NX_CONF_DIR=/etc/nginx/identity-conf
+export SSL_DIR=/etc/nginx/ssl-identity
+export NGINX_MAIN_CONF=/etc/nginx/nginx-identity.conf
+export NX_NGINX_PID_FILE=/run/nginx-identity.pid
 adduser -D -s /bin/bash acmetest
 printf 'acmetest:isolated-test-password\n' | chpasswd
-printf 'acmetest ALL=(ALL:ALL) ALL\nDefaults:acmetest !use_pty\n' > /etc/sudoers.d/acmetest
+printf 'acmetest ALL=(ALL:ALL) ALL\nDefaults:acmetest !use_pty\nDefaults:acmetest env_keep += "NX_TEST_NGINX_WRAPPER"\n' > /etc/sudoers.d/acmetest
 chmod 0440 /etc/sudoers.d/acmetest
-mkdir -p /home/acmetest/.acme.sh /etc/nginx/ssl-identity/example.com
+mkdir -p /home/acmetest/.acme.sh "$NX_CONF_DIR" "$SSL_DIR/example.com" /run \
+  /var/log/nginx /usr/share/nginx/html/.well-known/acme-challenge
 chmod 0755 /etc/nginx/ssl-identity /etc/nginx/ssl-identity/example.com
+cat > "$NGINX_MAIN_CONF" <<CONF
+pid $NX_NGINX_PID_FILE;
+error_log /var/log/nginx/identity-error.log notice;
+events { worker_connections 128; }
+http {
+  access_log off;
+  include $NX_CONF_DIR/*.conf;
+}
+CONF
+cat > "$NX_CONF_DIR/identity.conf" <<'CONF'
+server { listen 127.0.0.1:18080; server_name identity.example; location / { return 200 identity; } }
+CONF
 cat > /home/acmetest/.acme.sh/acme.sh <<'ACME'
 #!/bin/bash
 set -eu
@@ -37,18 +57,43 @@ for generation in initial renewed; do
 done
 chmod +x /home/acmetest/.acme.sh/acme.sh
 chown -R acmetest:acmetest /home/acmetest
-mv /usr/sbin/nginx /usr/sbin/nginx-real
-cat > /usr/sbin/nginx <<'NGINX'
+# Keep the real daemon in the execution path.  The wrapper only injects the
+# two service failures below; every successful -t/start/reload is a real
+# nginx invocation and is observed by the embedded runtime engine.
+# shellcheck source=tests/acme_nginx_fault_wrapper.sh
+source "$root/tests/acme_nginx_fault_wrapper.sh"
+nx_test_install_nginx_wrapper /usr/local/libexec/nginx-identity-wrapper
+mkdir -p /usr/local/libexec
+cat > /usr/local/libexec/nginx-identity-wrapper <<'NGINX'
 #!/bin/sh
 [ "$(id -u)" = 0 ] || exit 90
 printf '%s\n' "$*" >> /root/identity-nginx.log
-case "$*" in
-  -t) [ ! -e /root/fail-test ] || exit 42 ;;
-  '-s reload') [ ! -e /root/fail-reload ] || exit 43 ;;
-esac
-exit 0
+for arg do
+  if [ "$arg" = -t ] && [ -e /root/fail-test ]; then exit 42; fi
+  # Inject after a successful real syntax check: the live master rejects
+  # this nonlocal bind at its final, witness-bearing check. The next
+  # check removes it so rollback can converge.
+  if [ "$arg" = -t ] && [ -e /root/fail-reload ]; then
+    if [ ! -e /root/reload-injected ] && grep -q "Nginx-X temporary private generation witness" /etc/nginx/nginx-identity.conf; then
+      /usr/sbin/nginx "$@" || exit $?
+      printf 'server { listen 192.0.2.1:19999; }\n' > /etc/nginx/identity-conf/reload-fault.conf
+      touch /root/reload-injected
+      exit 0
+    fi
+    rm -f /etc/nginx/identity-conf/reload-fault.conf
+  fi
+done
+exec /usr/sbin/nginx "$@"
 NGINX
-chmod 0755 /usr/sbin/nginx
+chmod 0755 /usr/local/libexec/nginx-identity-wrapper
+cleanup() {
+  local rc=$?
+  /usr/sbin/nginx -c "$NGINX_MAIN_CONF" -s quit >/dev/null 2>&1 || true
+  if (( rc )); then tail -80 /var/log/nginx/identity-error.log >&2 || true; fi
+  nx_test_remove_nginx_wrapper
+  return "$rc"
+}
+trap cleanup EXIT
 cat > /home/acmetest/deploy-test <<SCRIPT
 #!/bin/bash
 set -euo pipefail
@@ -73,6 +118,27 @@ chmod 0700 /home/acmetest/askpass
 chown acmetest:acmetest /home/acmetest/askpass /home/acmetest/deploy-test
 su -s /bin/bash acmetest -c 'HOME=/home/acmetest bash /home/acmetest/deploy-test'
 uid="$(id -u acmetest)"
+[[ "$(curl --noproxy '*' -fsS http://127.0.0.1:18080/)" == identity ]]
+# A real TLS listener must serve the freshly deployed certificate, not merely
+# leave matching PEMs on disk.  Subsequent cron/rollback checks use this route.
+cat > "$NX_CONF_DIR/certificate.conf" <<CONF
+server { listen 127.0.0.1:18443 ssl; server_name example.com;
+ssl_certificate $SSL_DIR/example.com/fullchain.pem;
+ssl_certificate_key $SSL_DIR/example.com/privkey.pem;
+location / { return 200 certificate; } }
+CONF
+live_certificate() {
+  python3 - "$1" <<'PY'
+import socket, ssl, sys
+context = ssl._create_unverified_context()
+with context.wrap_socket(socket.create_connection(('127.0.0.1',18443),timeout=3), server_hostname='example.com') as stream:
+    live = stream.getpeercert(binary_form=True)
+expected = ssl.PEM_cert_to_DER_cert(open(sys.argv[1]).read())
+assert live == expected, 'daemon is not serving the expected certificate'
+PY
+}
+"/usr/local/libexec/nginxx-acme-$uid" deploy
+live_certificate /home/acmetest/initial-chain
 [[ "$(stat -c '%u:%a' /etc/nginx/ssl-identity/example.com/privkey.pem)" == 0:600 ]]
 [[ "$(stat -c '%u:%a' "/usr/local/libexec/nginxx-acme-$uid")" == 0:700 ]]
 crontab -l | grep -Fx "0 3 * * * /usr/local/libexec/nginxx-acme-$uid cron"
@@ -82,6 +148,7 @@ crontab -l | grep -Fx "0 3 * * * /usr/local/libexec/nginxx-acme-$uid cron"
 # Invoke precisely the root cron command after explicitly expiring sudo.
 "/usr/local/libexec/nginxx-acme-$uid" cron
 cmp /etc/nginx/ssl-identity/example.com/privkey.pem /home/acmetest/renewed-key
+live_certificate /home/acmetest/renewed-chain
 [[ ! -e /root/acme-hook-escalated ]]
 [[ "$(stat -c %u /home/acmetest/.acme.sh/acme.sh)" == "$uid" ]]
 # A forged source symlink cannot disclose root-only bytes.
@@ -101,12 +168,14 @@ refuse() {
 unchanged() {
   cmp /etc/nginx/ssl-identity/example.com/privkey.pem /home/acmetest/renewed-key
   cmp /etc/nginx/ssl-identity/example.com/fullchain.pem /home/acmetest/renewed-chain
+  live_certificate /home/acmetest/renewed-chain
 }
 for fault in test reload; do
   touch "/root/fail-$fault"
   refuse
   unchanged
   rm "/root/fail-$fault"
+  rm -f "$NX_CONF_DIR/reload-fault.conf" /root/reload-injected
 done
 chown nobody /etc/nginx/ssl-identity/example.com
 refuse
@@ -188,6 +257,7 @@ bash -c 'set -e; source "$1/nx.sh"; SSL_DIR=/etc/nginx/ssl-identity; nx_deploy_c
 /usr/local/libexec/nginxx-acme-0 cron
 cmp /etc/nginx/ssl-identity/example.com/privkey.pem /root/renewed-key
 cmp /etc/nginx/ssl-identity/example.com/fullchain.pem /root/renewed-chain
+live_certificate /root/renewed-chain
 uid=0
 cp /root/initial-key /root/.acme.sh/nginxx-deploy/example.com/privkey.pem
 cp /root/initial-chain /root/.acme.sh/nginxx-deploy/example.com/fullchain.pem
@@ -203,6 +273,7 @@ for fault in test reload; do
   refuse
   root_unchanged
   rm "/root/fail-$fault"
+  rm -f "$NX_CONF_DIR/reload-fault.conf" /root/reload-injected
 done
 PYTHONPATH=/root/fault-python refuse
 root_unchanged
@@ -221,5 +292,4 @@ if /usr/local/libexec/nginxx-acme-0 cron; then exit 1; fi
 cmp /root/acme.log /root/acme-before
 root_unchanged
 chmod 0700 /root/.acme.sh/acme.sh
-mv /usr/sbin/nginx-real /usr/sbin/nginx
 echo 'ok: password-sudo user deploys root:600 keys; root cron renews with expired sudo; user hooks stay unprivileged; symlink source rejected'

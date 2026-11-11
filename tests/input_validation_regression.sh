@@ -53,11 +53,11 @@ for entry in ./nx.sh "$root/bundle"; do
     [[ "$DNS_KEY1" == "$unicode_key" ]]
 
     # Unsafe state cannot be treated as absent configuration or overwriteable
-    # input. Failed export must report failure without replacing the environment.
+    # input. Failed child invocation must not replace the parent environment.
     printf 'DNS_PROVIDER=cf\nDNS_KEY1=stale\n' > "$DNS_CONF"
     chmod 644 "$DNS_CONF"
     CF_Token=stale-token
-    if export_dns_env; then exit 1; fi
+    if nx_acme_dns_command --issue -d example.com; then exit 1; fi
     [[ "$CF_Token" == stale-token ]]
     printf 'ACME_EMAIL=old@example.com\n' > "$EMAIL_CONF"
     chmod 644 "$EMAIL_CONF"

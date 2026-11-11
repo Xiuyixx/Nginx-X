@@ -8,7 +8,7 @@ nginx_bin="${NGINX_TEST_BIN:-$(command -v nginx || true)}"
 [[ -x "$nginx_bin" ]] || { echo 'SKIP: real nginx unavailable'; exit 0; }
 root="$NX_TEST_ENV_ROOT"
 bash tools/build-bundle.sh "$root/bundle"
-openssl req -x509 -newkey rsa:2048 -nodes -days 1 -subj /CN=localhost \
+openssl req -x509 -newkey rsa:2048 -nodes -days 1 -subj /CN=localhost -addext 'subjectAltName=DNS:localhost,DNS:127.0.0.1,DNS:[::1]' \
   -keyout "$root/key.pem" -out "$root/cert.pem" >/dev/null 2>&1
 python3 - "$PWD/nx.sh" "$root/bundle" "$nginx_bin" "$root" <<'PY'
 import http.server, threading, pathlib, subprocess, socket, ssl, sys, json, time, os
@@ -60,7 +60,7 @@ try:
                 for mode in ('normal','emby_https'):
                     s = socket.socket(); s.bind(('127.0.0.1',0)); port = s.getsockname()[1]; s.close()
                     site = root/'site.conf'
-                    r = shell(entry, 'build_external_proxy_conf test.example "$1" "$2/base/" "$3" "$4" 0 "$2" "$2" "$2/web?ref=ok"', port,upstream,mode,site)
+                    r = shell(entry, 'build_external_proxy_conf test.example "$1" "$2/base/" "$3" "$4" 0 "$2" "$2" "$2/web?ref=ok" "" on "$5"', port,upstream,mode,site,root/'cert.pem')
                     assert r.returncode == 0, r.stderr
                     conf = root/'proof.conf'
                     conf.write_text(f'''daemon off;

@@ -76,7 +76,7 @@ for kind in internal external; do
   add_reverse_proxy <<< $'example.com\n18080\n3000\n2' > "$root/output" 2>&1
   field=proxy_mode
  else
-  add_external_url_proxy <<< $'example.com\n18080\nhttps://127.0.0.1:3000/v1/\n6' > "$root/output" 2>&1
+  add_external_url_proxy <<< $'example.com\n18080\nhttps://127.0.0.1:3000/v1/\n6\n' > "$root/output" 2>&1
   field=external_mode
  fi
  conf="$CONF_DIR/example.com-18080.conf"
@@ -87,10 +87,10 @@ for kind in internal external; do
  # the same mode upgrades the old template through the existing transaction.
  sed -i '/client_max_body_size 64m;/d' "$conf"
  cp "$conf" "$root/legacy"
- FAIL_RELOAD=1 run_menu_action modify_conf "${conf##*/}" <<< $'\n\n\n' > "$root/output" 2>&1
+ FAIL_RELOAD=1 run_menu_action modify_conf "${conf##*/}" <<< $'\n\n\n\n' > "$root/output" 2>&1
  cmp "$conf" "$root/legacy"
  grep -q '操作未完成' "$root/output"
- modify_conf "${conf##*/}" <<< $'\n\n\n' > "$root/output" 2>&1
+ modify_conf "${conf##*/}" <<< $'\n\n\n\n' > "$root/output" 2>&1
  assert_stream "$conf"
  # The failed transaction includes a best-effort reload of the restored config.
  : > "$root/reloads"
@@ -98,7 +98,7 @@ for kind in internal external; do
  if [[ "$kind" == internal ]]; then
   modify_conf "${conf##*/}" <<< $'\n18081\n3001\n' > "$root/output" 2>&1
  else
-  modify_conf "${conf##*/}" <<< $'\n18081\nhttps://127.0.0.1:3001/v2/\n' > "$root/output" 2>&1
+  modify_conf "${conf##*/}" <<< $'\n18081\nhttps://127.0.0.1:3001/v2/\n\n' > "$root/output" 2>&1
  fi
  conf="$CONF_DIR/example.com-18081.conf"
  assert_stream "$conf"
@@ -109,7 +109,7 @@ for kind in internal external; do
   -keyout "$SSL_DIR/example.com/privkey.pem" -out "$SSL_DIR/example.com/fullchain.pem" >/dev/null 2>&1
  enable_https_for_conf_file example.com "$conf" 18443 > "$root/output" 2>&1
  assert_stream "$conf"
- modify_conf "${conf##*/}" <<< $'\n18444\n\n' > "$root/output" 2>&1
+ modify_conf "${conf##*/}" <<< $'\n18444\n\n\n' > "$root/output" 2>&1
  conf="$CONF_DIR/example.com-18444.conf"
  assert_stream "$conf"
  grep -q 'listen 18444 ssl' "$conf"
@@ -118,22 +118,22 @@ for kind in internal external; do
  disable_conf "${conf##*/}" > "$root/output" 2>&1
  conf="$conf.bak"
  cp "$conf" "$root/before"
- FAIL_RELOAD=1 run_menu_action modify_conf "${conf##*/}" <<< $'\n\n\n1' > "$root/output" 2>&1
+ FAIL_RELOAD=1 run_menu_action modify_conf "${conf##*/}" <<< $'\n\n\n1\n' > "$root/output" 2>&1
  cmp "$conf" "$root/before"
  grep -q '操作未完成' "$root/output"
- modify_conf "${conf##*/}" <<< $'\n\n\n1' > "$root/output" 2>&1
+ modify_conf "${conf##*/}" <<< $'\n\n\n1\n' > "$root/output" 2>&1
  conf="$(find "$CONF_DIR" -name 'example.com-*.conf.bak' -print)"
  if grep -q 'proxy_buffering off;\|proxy_cache off;\|client_max_body_size' "$conf"; then exit 1; fi
  [[ "$(conf_meta_get "$conf" "$field")" == normal ]]
  if [[ "$kind" == internal ]]; then selection=2; else selection=6; fi
- modify_conf "${conf##*/}" <<< $'\n\n\n'"$selection" > "$root/output" 2>&1
+ modify_conf "${conf##*/}" <<< $'\n\n\n'"$selection"$'\n' > "$root/output" 2>&1
  assert_stream "$conf"
  [[ "$(conf_meta_get "$conf" "$field")" == streaming ]]
  # Edited/custom config must never be blindly rebuilt.
  nx_conf_query metadata-set "$conf" edited true > "$root/edited"
  mv "$root/edited" "$conf"
  cp "$conf" "$root/before"
- run_menu_action modify_conf "${conf##*/}" <<< $'\n\n\n1' > "$root/output" 2>&1
+ run_menu_action modify_conf "${conf##*/}" <<< $'\n\n\n1\n' > "$root/output" 2>&1
  cmp "$conf" "$root/before"
  grep -q '已阻止' "$root/output"
 done
@@ -141,6 +141,6 @@ done
 rm -f "$CONF_DIR"/*
 build_proxy_conf example.com 18080 3000 "$CONF_DIR/example.com-18080.conf"
 sed -i '/^# proxy_mode=/d' "$CONF_DIR/example.com-18080.conf"
-modify_conf example.com-18080.conf <<< $'\n\n\n' > "$root/output" 2>&1
+modify_conf example.com-18080.conf <<< $'\n\n\n\n' > "$root/output" 2>&1
 [[ "$(conf_meta_get "$CONF_DIR/example.com-18080.conf" proxy_mode)" == normal ]]
 echo 'stream proxy real menu lifecycle: PASS'

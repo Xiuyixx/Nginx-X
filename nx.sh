@@ -15,7 +15,7 @@ NC='\033[0m'
 
 # ---------- 全局变量 ----------
 APP_NAME="Nginx-X"
-APP_VERSION="3.4.20"
+APP_VERSION="3.4.21"
 # Alpine 的 nginx 把 server 配置放在 http.d，其他系统用 conf.d
 if [[ -f /etc/nginx/http.d ]] || [[ -d /etc/nginx/http.d ]]; then
   CONF_DIR="/etc/nginx/http.d"
@@ -132,7 +132,10 @@ ensure_runtime_dependencies() {
       check_cmd "$cmd" || { error "依赖仍不可用：$cmd"; return 1; }
     done
   fi
-  nx_ensure_backend_dependencies "$pkg"
+  # nft/ss are optional backend-protection dependencies.  They must not make
+  # the ordinary manager, installer, diagnostics, or help path fail; the
+  # explicit backend-protection wizard installs/checks them after consent.
+  :
 }
 
 installed_script_target() {
@@ -147,7 +150,7 @@ installed_script_target() {
 }
 
 require_nginx_installed() {
-  if ! check_cmd nginx; then
+  if ! check_cmd "${NX_NGINX_BIN:-nginx}"; then
     error "未检测到 Nginx。请先到主菜单执行 [1) 安装升级] → [1) 安装升级 Nginx]。"
     return 1
   fi
@@ -182,62 +185,216 @@ run_editor() {
 }
 
 nginx_test() {
-  # 所有配置变更后必须调用 nginx -t
   require_nginx_installed || return 1
-  ${SUDO} nginx -t >/dev/null 2>&1
+  ${SUDO} "${NX_NGINX_BIN:-nginx}" -t -c "$NGINX_MAIN_CONF" >/dev/null 2>&1
+}
+
+# Emit the same engine for the standalone certificate dispatcher.  This is
+# code, not a probe override: both callers must prove a new live generation.
+nx_nginx_reload_engine() {
+  cat <<'PYRELOAD'
+import glob, os, re, shlex, shutil, signal, stat, subprocess, sys, tempfile, time
+
+def nx_reload(binary='nginx', conf='/etc/nginx/nginx.conf', pidfile='', prefix='', driver='', timeout=8):
+    # A fresh private notice log is the configuration-generation witness.
+    # nginx -t only opens it; only a master running this newly parsed cycle
+    # emits "start worker processes" into it. Respawning old workers cannot.
+    timeout=float(timeout)
+    if not 0.2 <= timeout <= 60: raise RuntimeError('verification timeout must be 0.2..60 seconds')
+    binary=shutil.which(binary) or binary
+    conf=os.path.realpath(conf)
+    def run(argv):
+        return subprocess.run(argv, check=True, close_fds=True, timeout=30,
+                              stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+    version=run([binary,'-V']).stderr.decode()
+    options=shlex.split(version.split('configure arguments:',1)[-1])
+    def compiled(name, default=''):
+        return next((v.split('=',1)[1] for v in options if v.startswith('--'+name+'=')),default)
+    prefix=os.path.abspath(prefix or compiled('prefix','/usr/local/nginx'))
+    args=[binary,'-p',prefix,'-c',conf]
+    run(args+['-t'])
+    # nginx resolves relative include paths against the main config directory,
+    # and relative pid paths against its prefix. shlex punctuation runs must
+    # be split (e.g. "};"), while quoted arguments stay intact.
+    def directives(path, stack=()):
+        path=os.path.realpath(path)
+        if path in stack: raise RuntimeError('recursive nginx include')
+        lexer=shlex.shlex(open(path).read(),posix=True,punctuation_chars=';{}')
+        lexer.whitespace_split=True
+        tokens=[]
+        for token in lexer:
+            tokens.extend(list(token) if re.fullmatch(r'[;{}]+',token) else [token])
+        result=[]; depth=0; entry=[]
+        for token in tokens:
+            if token in (';','{','}'):
+                if entry:
+                    if entry[0]=='include' and token==';':
+                        if len(entry)!=2: raise RuntimeError('ambiguous include')
+                        pattern=entry[1]
+                        if not os.path.isabs(pattern): pattern=os.path.join(os.path.dirname(conf),pattern)
+                        for child in sorted(glob.glob(pattern)):
+                            result.extend((depth+d,words) for d,words in directives(child,stack+(path,)))
+                    else: result.append((depth,entry))
+                entry=[]
+                if token=='{': depth+=1
+                elif token=='}': depth-=1
+            else: entry.append(token)
+        return result
+    declarations=directives(conf)
+    found=[words[1] for depth,words in declarations if depth==0 and words[0]=='pid' and len(words)==2]
+    if len(found)>1: raise RuntimeError('ambiguous pid directive')
+    configured_pid=found[0] if found else compiled('pid-path','logs/nginx.pid')
+    configured_pid=os.path.realpath(os.path.join(prefix,configured_pid))
+    if pidfile and os.path.realpath(os.path.join(prefix,pidfile))!=configured_pid:
+        raise RuntimeError('explicit pid file disagrees with target configuration')
+    pidfile=configured_pid
+    def proc(pid):
+        base='/proc/'+str(pid)
+        fields=open(base+'/stat').read().rsplit(')',1)[1].split()
+        cmd=open(base+'/cmdline','rb').read().replace(b'\0',b' ').decode(errors='replace')
+        return str(pid)+':'+fields[19],int(fields[1]),fields[0],cmd
+    def snapshot():
+        try:
+            raw=open(pidfile).read().strip()
+            if not raw: return None
+            if not re.fullmatch(r'[1-9][0-9]*',raw): raise RuntimeError('invalid nginx pid file')
+            pid=int(raw); identity,_,state,cmd=proc(pid)
+            if state=='Z': return None
+            if not cmd.startswith('nginx: master process '): raise RuntimeError('pid is not an nginx master')
+            if not os.path.samefile('/proc/'+raw+'/exe',binary): raise RuntimeError('master binary mismatch')
+            argv=shlex.split(cmd[len('nginx: master process '):])
+            def option(name,default):
+                if name in argv: return argv[argv.index(name)+1]
+                return next((x[len(name):] for x in argv[1:] if x.startswith(name) and len(x)>len(name)),default)
+            actual_prefix=os.path.abspath(option('-p',compiled('prefix','/usr/local/nginx')))
+            actual_conf=os.path.realpath(os.path.join(actual_prefix,option('-c',compiled('conf-path','conf/nginx.conf'))))
+            if actual_conf!=conf or os.path.realpath(actual_prefix)!=os.path.realpath(prefix):
+                raise RuntimeError('master configuration/prefix mismatch')
+            # Command-line globals may override instance identity. Fail before
+            # signaling rather than silently interpreting a different pid.
+            if re.search(r'(?:^|\s)pid\s',option('-g','')):
+                raise RuntimeError('command-line pid directive is unsupported; use a configuration pid directive')
+            children=open(f'/proc/{pid}/task/{pid}/children').read().split()
+            workers=set()
+            for child in children:
+                try: wid,ppid,state,title=proc(int(child))
+                except (FileNotFoundError,ProcessLookupError): continue
+                if ppid==pid and state!='Z' and title.strip()=='nginx: worker process': workers.add(wid)
+            return identity,workers
+        except (FileNotFoundError,ProcessLookupError): return None
+    before=snapshot()
+    deadline=time.monotonic()+timeout
+    while before and not before[1] and time.monotonic()<deadline:
+        time.sleep(.05); before=snapshot()
+    if before and not before[1]: raise RuntimeError('master has no initialized active workers')
+    action='reload' if before else 'start'
+    old=set() if before is None else before[1]
+    original=open(conf,'rb').read(); original_stat=os.stat(conf)
+    # Existing transaction/dispatcher locks serialize callers. The marker is
+    # local to this invocation, with finally restoration covering both callers.
+    # No persistent include, public listener, or change to site configuration.
+    stage=tempfile.mkdtemp(prefix='nginxx-generation-')
+    log=stage+'/notice.log'; backup=stage+'/nginx.conf.original'
+    with open(backup,'wb') as stream: stream.write(original)
+    os.chmod(backup,0o600)
+    patched=original+b'\n# Nginx-X temporary private generation witness\nerror_log '+log.encode()+b' notice;\n'
+    changed=False; restored=False; activated=False
+    def interrupted(signum, frame):
+        raise RuntimeError('configuration verification interrupted by signal '+str(signum))
+    previous_handlers={sig:signal.getsignal(sig) for sig in (signal.SIGHUP,signal.SIGINT,signal.SIGTERM)}
+    for sig in previous_handlers: signal.signal(sig,interrupted)
+    def write_conf(content):
+        with open(conf,'r+b') as stream:
+            stream.seek(0); stream.write(content); stream.truncate(); stream.flush(); os.fsync(stream.fileno())
+    try:
+        changed=True; write_conf(patched)
+        run(args+['-t'])
+        # Snapshot after -t, before the requested action. Only the target
+        # master's complete fresh generation in this unique log is accepted.
+        offset=os.path.getsize(log)
+        if driver: run([driver,action])  # isolated regression seam only
+        elif before:
+            if snapshot() is None or snapshot()[0]!=before[0]: raise RuntimeError('master changed before signal')
+            os.kill(int(before[0].split(':',1)[0]),signal.SIGHUP)
+        else:
+            # Never operate a generic service belonging to another instance.
+            run(args)
+        deadline=time.monotonic()+timeout; stable=None; since=0
+        while time.monotonic()<deadline:
+            current=snapshot()
+            with open(log,'rb') as stream:
+                stream.seek(offset); lines=stream.read().decode(errors='replace').splitlines()
+            if current and (before is None or current[0]==before[0]):
+                master=current[0].split(':',1)[0]
+                records=[]
+                for line in lines:
+                    match=re.match(r'^\d{4}/\d\d/\d\d \d\d:\d\d:\d\d \[notice\] '+master+r'#\d+: (.*)$',line)
+                    if match: records.append(match[1])
+                # Batch header is absent on ordinary SIGCHLD worker respawn.
+                generation=set(); batch=False
+                for record in records:
+                    if record=='start worker processes': generation=set(); batch=True
+                    elif batch:
+                        match=re.fullmatch(r'start worker process (\d+)',record)
+                        if match: generation.add(match[1])
+                active={wid.split(':',1)[0] for wid in current[1]}
+                if batch and active and active==generation and not (current[1]&old):
+                    evidence=(current[0],tuple(sorted(current[1])))
+                    if evidence!=stable: stable=evidence; since=time.monotonic()
+                    elif time.monotonic()-since>=.2:
+                        activated=True
+                        return action
+                else: stable=None
+            else: stable=None
+            time.sleep(.05)
+        raise RuntimeError('nginx runtime not proven: no matching fresh configuration-generation record and initialized workers')
+    finally:
+        if changed:
+            # Do not overwrite a concurrent external administrator's edit.
+            if open(conf,'rb').read()!=patched:
+                raise RuntimeError('main configuration changed concurrently; original retained: '+backup)
+            try:
+                write_conf(original)
+                os.utime(conf,ns=(original_stat.st_atime_ns,original_stat.st_mtime_ns))
+                restored=True
+            except OSError as exc:
+                raise RuntimeError('generation-marker restoration failed; original retained: '+backup) from exc
+        for sig, handler in previous_handlers.items(): signal.signal(sig,handler)
+        if not changed or restored:
+            # The running cycle retains this error_log path until its next
+            # reload. Keep it valid for log reopen (USR1); deleting it here
+            # would leave an orphaned FD and make reopen fail. No config bytes
+            # or credentials are retained after successful restoration.
+            if activated:
+                os.unlink(backup)
+                print('Nginx generation evidence retained until a later reload: '+log, file=sys.stderr)
+            else:
+                # A timeout can still have activated the generation; retain
+                # the log as evidence, but not the restored main-config copy.
+                os.unlink(backup)
+
+PYRELOAD
 }
 
 reload_nginx_safe() {
-  # reload 前必须先测试配置
-  if ! nginx_test; then
-    error "配置校验失败，已拦截 reload。"
-    ${SUDO} nginx -t || true
+  local engine
+  engine="$(nx_nginx_reload_engine)" || return 1
+  # Python closes inherited transaction/deployment descriptors before service
+  # commands. Existing callers additionally close their lock FDs in subshells.
+  if ! ${SUDO} python3 -c "$engine
+try:
+    nx_reload(*sys.argv[1:])
+except Exception as exc:
+    print('Nginx apply failed: '+str(exc), file=sys.stderr)
+    if isinstance(exc, subprocess.CalledProcessError) and exc.stderr:
+        print(exc.stderr.decode(errors='replace'), file=sys.stderr)
+    sys.exit(1)
+" "${NX_NGINX_BIN:-nginx}" "$NGINX_MAIN_CONF" "${NX_NGINX_PID_FILE:-}" \
+    "${NX_NGINX_PREFIX:-}" '' "${NX_NGINX_VERIFY_TIMEOUT:-8}"; then
+    error '无法证明 Nginx 新配置已生效；操作失败，请检查重载/回滚结果。'
     return 1
   fi
-
-  if check_cmd systemctl; then
-    if ${SUDO} systemctl is-active --quiet nginx; then
-      if ! ${SUDO} systemctl reload nginx; then
-        error "Nginx 重载失败。"
-        return 1
-      fi
-      info "Nginx 已重载。"
-    else
-      if ! ${SUDO} systemctl start nginx; then
-        error "Nginx 启动失败。"
-        return 1
-      fi
-      info "检测到 Nginx 未运行，已自动启动。"
-    fi
-  elif check_cmd rc-service; then
-    if ${SUDO} rc-service nginx status 2>/dev/null; then
-      if ! ${SUDO} rc-service nginx reload 2>/dev/null && ! ${SUDO} rc-service nginx restart; then
-        error "Nginx 重载失败。"
-        return 1
-      fi
-      info "Nginx 已重载。"
-    else
-      if ! ${SUDO} rc-service nginx start; then
-        error "Nginx 启动失败。"
-        return 1
-      fi
-      info "检测到 Nginx 未运行，已自动启动。"
-    fi
-  else
-    if ${SUDO} service nginx status >/dev/null 2>&1; then
-      if ! ${SUDO} service nginx reload; then
-        error "Nginx 重载失败。"
-        return 1
-      fi
-      info "Nginx 已重载。"
-    else
-      if ! ${SUDO} service nginx start; then
-        error "Nginx 启动失败。"
-        return 1
-      fi
-      info "检测到 Nginx 未运行，已自动启动。"
-    fi
-  fi
+  info 'Nginx 已应用配置（私有配置代际记录及已初始化 worker 已验证）。'
 }
 
 ensure_dirs() {
@@ -1124,7 +1281,7 @@ conf_safe_for_template_rebuild() (
 
   mode="$(conf_meta_get "$stage/clean" mode)" || return 1
   if [[ "$mode" == external ]]; then
-    local upstream external_mode stream streams source_url referer
+    local upstream external_mode stream streams source_url referer upstream_tls_verify upstream_ca_file
     upstream="$(conf_meta_get "$stage/clean" upstream_url)" || return 1
     external_mode="$(conf_meta_get "$stage/clean" external_mode)" || return 1
     external_mode="${external_mode:-normal}"
@@ -1133,9 +1290,11 @@ conf_safe_for_template_rebuild() (
     streams="$(conf_meta_get "$stage/clean" stream_upstream_urls)" || return 1
     source_url="$(conf_meta_get "$stage/clean" source_site_url)" || return 1
     referer="$(conf_meta_get "$stage/clean" referer_url)" || return 1
+    upstream_tls_verify="$(conf_meta_get "$stage/clean" upstream_tls_verify)" || return 1
+    upstream_ca_file="$(conf_meta_get "$stage/clean" upstream_ca_file)" || return 1
     local secure=0
     [[ "$tls" != true ]] || secure=1
-    build_external_proxy_conf "$domain" "$port" "$upstream" "$external_mode" "$stage/reference" "$secure" "$stream" "$source_url" "$referer" "$streams" || return 1
+    build_external_proxy_conf "$domain" "$port" "$upstream" "$external_mode" "$stage/reference" "$secure" "$stream" "$source_url" "$referer" "$streams" "${upstream_tls_verify:-on}" "$upstream_ca_file" || return 1
   elif [[ -z "$mode" ]]; then
     local backend_port proxy_mode
     backend_port="$(conf_meta_get "$stage/clean" backend_port)" || return 1
@@ -1521,6 +1680,7 @@ add_reverse_proxy() {
 add_external_url_proxy() {
   local domain listen_port upstream_url target tmp external_mode
   local stream_upstream_url="" stream_upstream_urls="" source_site_url="" referer_url=""
+  local upstream_tls_verify=on upstream_ca_file="" tls_policy
   local desired_port create_port force_enable_https="0" tls_status=0
 
   require_nginx_installed || return 1
@@ -1571,6 +1731,9 @@ add_external_url_proxy() {
     [[ -z "$referer_url" ]] && referer_url="$(default_referer_from_url "$source_site_url")"
   fi
 
+  tls_policy="$(nx_select_upstream_tls "$upstream_url" "$stream_upstream_urls")" || return $?
+  IFS='|' read -r upstream_tls_verify upstream_ca_file <<< "$tls_policy"
+
   if is_port_used_os "$listen_port"; then
     warn "监听端口 ${listen_port} 当前已被占用（Nginx 多站点场景通常可复用）。"
     if ! confirm "是否继续写入配置并交由 nginx -t 校验？"; then
@@ -1608,7 +1771,7 @@ add_external_url_proxy() {
   tmp="$(mktemp /tmp/nginxx-external-"${domain}"-XXXXXX)" || return 1
   trap 'rm -f "${tmp:-}"' RETURN
 
-  build_external_proxy_conf "$domain" "$create_port" "$upstream_url" "$external_mode" "$tmp" "0" "$stream_upstream_url" "$source_site_url" "$referer_url" "$stream_upstream_urls" || { rm -f "$tmp"; return 1; }
+  build_external_proxy_conf "$domain" "$create_port" "$upstream_url" "$external_mode" "$tmp" "0" "$stream_upstream_url" "$source_site_url" "$referer_url" "$stream_upstream_urls" "$upstream_tls_verify" "$upstream_ca_file" || { rm -f "$tmp"; return 1; }
   if [[ "$force_enable_https" == "1" ]]; then
     local tls_tmp
     tls_tmp="$(mktemp /tmp/nginxx-final-tls-XXXXXX)" || { rm -f "$tmp"; return 1; }
@@ -1963,7 +2126,7 @@ nx_modify_external_from_snapshot() {
   local file src current_domain current_listen current_upstream_url current_mode
   local current_stream_upstream_url current_stream_upstream_urls current_source_site_url current_referer_url
   local new_domain new_listen new_upstream_url new_mode new_stream_upstream_url new_stream_upstream_urls new_source_site_url new_referer_url
-  local tmp new_target
+  local tmp new_target tls_policy upstream_tls_verify upstream_ca_file
   local was_disabled=0
 
   file="${1:-}"
@@ -1983,6 +2146,8 @@ nx_modify_external_from_snapshot() {
   current_stream_upstream_urls="$(conf_meta_get "$base" stream_upstream_urls)"
   current_source_site_url="$(conf_meta_get "$base" source_site_url)"
   current_referer_url="$(conf_meta_get "$base" referer_url)"
+  upstream_tls_verify="$(conf_meta_get "$base" upstream_tls_verify)" || return 1
+  upstream_ca_file="$(conf_meta_get "$base" upstream_ca_file)" || return 1
 
   [[ -z "$current_mode" ]] && current_mode="normal"
   [[ -z "$current_listen" ]] && current_listen="80"
@@ -2066,9 +2231,11 @@ nx_modify_external_from_snapshot() {
     new_target="$(conf_target_path "$new_domain" "$new_listen")"
     (( was_disabled == 0 )) || new_target="${new_target}.bak"
   fi
+  tls_policy="$(nx_select_upstream_tls "$new_upstream_url" "$new_stream_upstream_urls" "${upstream_tls_verify:-on}" "$upstream_ca_file")" || return $?
+  IFS='|' read -r upstream_tls_verify upstream_ca_file <<< "$tls_policy"
   tmp="$(mktemp /tmp/nginxx-external-mod-XXXXXX)" || return 1
   trap 'rm -f "${tmp:-}"' RETURN
-  build_external_proxy_conf "$new_domain" "$new_listen" "$new_upstream_url" "$new_mode" "$tmp" "0" "$new_stream_upstream_url" "$new_source_site_url" "$new_referer_url" "$new_stream_upstream_urls" || return 1
+  build_external_proxy_conf "$new_domain" "$new_listen" "$new_upstream_url" "$new_mode" "$tmp" "0" "$new_stream_upstream_url" "$new_source_site_url" "$new_referer_url" "$new_stream_upstream_urls" "$upstream_tls_verify" "$upstream_ca_file" || return 1
   nx_preserve_modify_tls "$base" "$tmp" "$new_domain" "$new_listen" || return 1
   apply_conf_with_rollback "$tmp" "$new_target" "$src" || return 1
   info "配置已修改，保留原协议与启停状态。"

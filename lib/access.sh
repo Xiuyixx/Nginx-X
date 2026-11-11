@@ -408,6 +408,7 @@ nx_domain_enable() (
   local NX_DOMAIN_ACTION=enable NX_DOMAIN_FILE="$1"
   [[ $EUID == 0 ]] || { error '组合保护请使用 sudo 启动 Nginx-X（需要 root 私有快照与防火墙锁）。'; return 1; }
   confirm '开启将同时限制 Nginx 域名入口并安装 nftables/systemd 本机后端保护；所有共享后端端口的远端访问都会被阻断，保留本机回环。确认开启？' || return 10
+  nx_prepare_backend_dependencies || return 1
   if ! nx_transaction nx_access_set_policy_files "$1" strict; then
     error '开启未完成：需支持本机后端保护；外部/静态或不支持环境请在高级设置仅限制 Nginx。原设置已尝试恢复。'
     return 1

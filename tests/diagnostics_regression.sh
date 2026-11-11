@@ -21,6 +21,9 @@ nx_traffic_rows "$T/log" "$T/site.conf" > "$T/out"
 grep -q '请求: 2 | 下行: 2.00' "$T/out"
 printf 'nx1 other.example 0 80 http other.example\n' > "$T/log"
 nx_traffic_rows "$T/log" "$T/site.conf" | grep -q '请求: 0'
+# README's documented six-field format must remain consumable by the viewer.
+printf 'nx1 main.example 2048 18443 https main.example\n' > "$T/log"
+nx_traffic_rows "$T/log" "$T/site.conf" | grep -q '请求: 1 | 下行: 0.00'
 printf 'combined nonsense\n' > "$T/log"
 nx_traffic_rows "$T/log" "$T/site.conf" | grep -q '请求: N/A'
 : > "$T/log"

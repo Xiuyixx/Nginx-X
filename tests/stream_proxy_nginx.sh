@@ -76,7 +76,7 @@ finally:
     release.set()
     for srv in servers: srv.shutdown()
 PY
-openssl req -x509 -newkey rsa:2048 -nodes -days 1 -subj /CN=localhost \
+openssl req -x509 -newkey rsa:2048 -nodes -days 1 -subj /CN=127.0.0.1 \
  -keyout "$root/key.pem" -out "$root/cert.pem" >/dev/null 2>&1
 python3 "$root/proof.py" "$root" > "$root/proof.log" 2>&1 &
 proof_pid=$!
@@ -86,7 +86,7 @@ for ((i=0;i<250;i++)); do [[ ! -f "$root/ready" ]] || break; sleep .02; done
 read -r http_port https_port < "$root/ports" || true
 build_proxy_conf internal.example 18090 "$http_port" "$CONF_DIR/internal.conf" streaming
 build_external_proxy_conf external.example 18091 "http://127.0.0.1:$http_port/api/" streaming "$CONF_DIR/external.conf"
-build_external_proxy_conf external.example 18092 "https://127.0.0.1:$https_port/api/" streaming "$CONF_DIR/tls-upstream.conf"
+build_external_proxy_conf external.example 18092 "https://127.0.0.1:$https_port/api/" streaming "$CONF_DIR/tls-upstream.conf" 0 '' '' '' '' on "$root/cert.pem"
 cat > "$NGINX_MAIN_CONF" <<CONF
 pid $root/nginx.pid;
 error_log $root/error.log;

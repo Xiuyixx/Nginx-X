@@ -157,12 +157,12 @@ save_dns_conf() {
   warn "提醒：DNS API 密钥以明文存储于该文件，请自行保护该主机的账户权限。"
 }
 
-has_dns_config() {
+has_dns_config() (
   load_dns_conf || return $?
   [[ -n "${DNS_PROVIDER:-}" && -n "${DNS_KEY1:-}" ]]
-}
+)
 
-get_dns_issue_args() {
+get_dns_issue_args() (
   load_dns_conf || return $?
   case "${DNS_PROVIDER:-}" in
     cf|cloudflare)
@@ -193,6 +193,19 @@ get_dns_issue_args() {
       echo ""
       ;;
   esac
+)
+
+read_dns_secret() {
+  local __result_var="$1" prompt="$2" value=''
+  # Bash's -s suppresses terminal echo; keep the trailing newline separate so
+  # the secret itself is never copied into the transcript or menu output.
+  if ! IFS= read -r -s -p "$prompt" value; then
+    printf '\n' >&2
+    printf -v "$__result_var" '%s' ''
+    return 10
+  fi
+  printf '\n' >&2
+  printf -v "$__result_var" '%s' "$value"
 }
 
 setup_dns_api() {
@@ -209,13 +222,13 @@ setup_dns_api() {
   read -rp "请选择（1-8）: " choice || return 10
 
   case "$choice" in
-    1) provider="cf"; read -rp "Cloudflare API Token: " key1 || return 10 ;;
-    2) provider="dp"; read -rp "DNSPod ID: " key1 || return 10; read -rp "DNSPod Key: " key2 || return 10 ;;
-    3) provider="ali"; read -rp "Aliyun AccessKey ID: " key1 || return 10; read -rp "Aliyun AccessKey Secret: " key2 || return 10 ;;
-    4) provider="he"; read -rp "HE.net Username: " key1 || return 10; read -rp "HE.net Password: " key2 || return 10 ;;
-    5) provider="gd"; read -rp "GoDaddy API Key: " key1 || return 10; read -rp "GoDaddy API Secret: " key2 || return 10 ;;
-    6) provider="hw"; read -rp "华为云 Username: " key1 || return 10; read -rp "华为云 Password: " key2 || return 10 ;;
-    7) provider="aws"; read -rp "AWS Access Key ID: " key1 || return 10; read -rp "AWS Secret Access Key: " key2 || return 10 ;;
+    1) provider="cf"; read_dns_secret key1 "Cloudflare API Token: " || return 10 ;;
+    2) provider="dp"; read -rp "DNSPod ID: " key1 || return 10; read_dns_secret key2 "DNSPod Key: " || return 10 ;;
+    3) provider="ali"; read -rp "Aliyun AccessKey ID: " key1 || return 10; read_dns_secret key2 "Aliyun AccessKey Secret: " || return 10 ;;
+    4) provider="he"; read -rp "HE.net Username: " key1 || return 10; read_dns_secret key2 "HE.net Password: " || return 10 ;;
+    5) provider="gd"; read_dns_secret key1 "GoDaddy API Key: " || return 10; read_dns_secret key2 "GoDaddy API Secret: " || return 10 ;;
+    6) provider="hw"; read -rp "华为云 Username: " key1 || return 10; read_dns_secret key2 "华为云 Password: " || return 10 ;;
+    7) provider="aws"; read -rp "AWS Access Key ID: " key1 || return 10; read_dns_secret key2 "AWS Secret Access Key: " || return 10 ;;
     8) provider="google"; read -rp "GCE Project: " key1 || return 10; read -rp "Service Account Email: " key2 || return 10 ;;
     *) error "无效选择。"; return 1 ;;
   esac
@@ -223,18 +236,6 @@ setup_dns_api() {
 
   [[ "$provider" == cf || -n "${key2:-}" ]] || { error "第二项凭据不能为空。"; return 1; }
   save_dns_conf "$provider" "$key1" "${key2:-}" || return 1
-
-  # Export env vars for acme.sh
-  case "$provider" in
-    cf) export CF_Token="$key1" ;;
-    dp) export DP_Id="$key1"; export DP_Key="$key2" ;;
-    ali) export Ali_Key="$key1"; export Ali_Secret="$key2" ;;
-    he) export HE_Username="$key1"; export HE_Password="$key2" ;;
-    gd) export GD_Key="$key1"; export GD_Secret="$key2" ;;
-    hw) export HUAWEICLOUD_Username="$key1"; export HUAWEICLOUD_Password="$key2" ;;
-    aws) export AWS_ACCESS_KEY_ID="$key1"; export AWS_SECRET_ACCESS_KEY="$key2" ;;
-    google) export GCE_Project="$key1"; export GCE_ServiceAccountEmail="$key2" ;;
-  esac
 
   info "DNS API 配置完成（${provider}）。"
   if confirm "是否现在测试申请证书？"; then
@@ -246,8 +247,12 @@ setup_dns_api() {
   fi
 }
 
-export_dns_env() {
+# Credentials exist in the environment only for this ACME issue process (and
+# its DNS plugin children), never for installation, deployment, reload or cron.
+nx_acme_dns_command() (
   load_dns_conf || return $?
+  [[ -n "${DNS_KEY1:-}" ]] || return 1
+  [[ "${DNS_PROVIDER:-}" == cf || -n "${DNS_KEY2:-}" ]] || return 1
   # DNS_KEY1/DNS_KEY2 are assigned by load_dns_conf after safe parsing.
   # shellcheck disable=SC2153
   case "${DNS_PROVIDER:-}" in
@@ -259,8 +264,10 @@ export_dns_env() {
     hw) export HUAWEICLOUD_Username="${DNS_KEY1}"; export HUAWEICLOUD_Password="${DNS_KEY2}" ;;
     aws) export AWS_ACCESS_KEY_ID="${DNS_KEY1}"; export AWS_SECRET_ACCESS_KEY="${DNS_KEY2}" ;;
     google) export GCE_Project="${DNS_KEY1}"; export GCE_ServiceAccountEmail="${DNS_KEY2}" ;;
+    *) return 1 ;;
   esac
-}
+  exec "$HOME/.acme.sh/acme.sh" "$@"
+)
 
 detect_cert_mode() {
   # 返回 http 或 dns（自动检测最适合的验证方式）
@@ -352,13 +359,12 @@ _issue_cert_dns() {
   ensure_acme_installed || return 1
 
   note "开始为 ${domain} 申请证书（DNS-01 验证）..."
-  export_dns_env || return 1
   "$HOME/.acme.sh/acme.sh" --set-default-ca --server letsencrypt >/dev/null 2>&1 || true
   "$HOME/.acme.sh/acme.sh" --register-account -m "$ACME_EMAIL" >/dev/null 2>&1 || true
 
   # dns_args holds acme.sh flags like "--dns dns_cf" and must word-split into two args.
   # shellcheck disable=SC2086
-  issue_output="$("$HOME/.acme.sh/acme.sh" --issue -d "$domain" $dns_args 2>&1)" || {
+  issue_output="$(nx_acme_dns_command --issue -d "$domain" $dns_args 2>&1)" || {
     echo "$issue_output"
     if echo "$issue_output" | grep -qi 'rateLimited\|too many certificates'; then
       retry_after="$(echo "$issue_output" | sed -n 's/.*retry after \([^:]*UTC\).*/\1/p' | head -n1)"
@@ -1208,7 +1214,8 @@ nx_acme_prepare_dispatch() {
   tmp="$(mktemp)" || return 1
   {
     printf '#!/bin/bash\nset -euo pipefail\nPATH=/usr/sbin:/usr/bin:/sbin:/bin\nexport PATH\n'
-    printf 'account=%q\naccount_home=%q\nssl=%q\nconf=%q\nmanifest=%q\n' "$user" "$HOME" "$SSL_DIR" "$CONF_DIR" "$NX_ACME_MANIFEST"
+    printf 'account=%q\naccount_home=%q\nssl=%q\nconf=%q\nmanifest=%q\nmain_conf=%q\n' "$user" "$HOME" "$SSL_DIR" "$CONF_DIR" "$NX_ACME_MANIFEST" "$NGINX_MAIN_CONF"
+    printf 'nginx_bin=%q\nnginx_pid=%q\nnginx_prefix=%q\nnginx_timeout=%q\n' "${NX_NGINX_BIN:-nginx}" "${NX_NGINX_PID_FILE:-}" "${NX_NGINX_PREFIX:-}" "${NX_NGINX_VERIFY_TIMEOUT:-8}"
     cat <<'DISPATCH'
 [[ $EUID == 0 ]] || exit 1
 as_account() (
@@ -1329,9 +1336,14 @@ if not stat.S_ISDIR(s.st_mode) or s.st_uid or s.st_mode&0o022: raise SystemExit(
 PYCONFTRUST
 exec {conf_fd}<"$conf"
 flock -x "$conf_fd"
-python3 - "$ssl" "$manifest" "$account" "$account_home" <<'PYPUBLISH'
+{ cat <<'PYPUBLISH_ENGINE'
+DISPATCH
+    nx_nginx_reload_engine
+    cat <<'DISPATCH'
+PYPUBLISH_ENGINE
+cat <<'PYPUBLISH'
 import os,sys,stat,tempfile,subprocess,shutil,glob,re,signal
-ssl,manifest,account,home=sys.argv[1:]
+ssl,manifest,account,home,main_conf,nginx_bin,nginx_pid,nginx_prefix,nginx_timeout=sys.argv[1:]
 def trusted(path, directory=False):
     st=os.lstat(path)
     if st.st_uid or st.st_mode & 0o022 or (not stat.S_ISDIR(st.st_mode) and (not stat.S_ISREG(st.st_mode) or st.st_nlink!=1)):
@@ -1345,12 +1357,7 @@ def trusted(path, directory=False):
 def run(args,**kwargs):
     return subprocess.run(args,check=True,close_fds=True,**kwargs)
 def reload():
-    run(['nginx','-t'])
-    if shutil.which('systemctl') and os.path.isdir('/run/systemd/system'):
-        run(['systemctl','reload','nginx'])
-    elif shutil.which('rc-service'): run(['rc-service','nginx','reload'])
-    elif os.access('/etc/init.d/nginx',os.X_OK): run(['/etc/init.d/nginx','reload'])
-    else: run(['nginx','-s','reload'])
+    nx_reload(nginx_bin, main_conf, nginx_pid, nginx_prefix, timeout=nginx_timeout)
 def output(args): return subprocess.check_output(args,stderr=subprocess.DEVNULL,close_fds=True)
 trusted(ssl,True); trusted(manifest)
 domains=open(manifest).read().splitlines()
@@ -1421,13 +1428,16 @@ except BaseException:
             failed=True; print('rollback failed; backup retained: '+stage+': '+str(exc),file=sys.stderr)
     if published:
         try: reload()
-        except Exception: print('old files restored; nginx reload failed',file=sys.stderr)
+        except Exception:
+            failed=True
+            print('old files restored; nginx reload failed; deployment backups retained',file=sys.stderr)
     if not failed:
         for stage in plans: shutil.rmtree(stage)
     raise
 else:
     for stage in plans: shutil.rmtree(stage)
 PYPUBLISH
+} | python3 - "$ssl" "$manifest" "$account" "$account_home" "$main_conf" "$nginx_bin" "$nginx_pid" "$nginx_prefix" "$nginx_timeout"
 install_committed=1
 DISPATCH
   } > "$tmp"

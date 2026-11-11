@@ -9,7 +9,7 @@ root="$NX_TEST_ENV_ROOT"
 mkdir -p "$SSL_DIR/stream.example" "$root/logs"
 # Packaged nginx may run workers as nobody; allow traversal of the test prefix.
 chmod 0755 "$root"
-openssl req -x509 -newkey rsa:2048 -nodes -days 1 -subj /CN=stream.example \
+openssl req -x509 -newkey rsa:2048 -nodes -days 1 -subj /CN=127.0.0.1 -addext subjectAltName=DNS:stream.example,DNS:127.0.0.1 \
  -keyout "$SSL_DIR/stream.example/privkey.pem" -out "$SSL_DIR/stream.example/fullchain.pem" >/dev/null 2>&1
 bash tools/build-bundle.sh "$root/nx-bundle"
 cat > "$root/proof.py" <<'PY'
@@ -95,9 +95,9 @@ http_port="$2" https_port="$3"
 shift 3
 build_proxy_conf stream.example "$1" "$http_port" "$CONF_DIR/internal.conf" streaming
 build_external_proxy_conf stream.example "$2" "http://127.0.0.1:$http_port/api/" streaming "$CONF_DIR/external.conf"
-build_external_proxy_conf stream.example "$3" "https://127.0.0.1:$https_port/api/" streaming "$CONF_DIR/external-upstream-tls.conf"
+build_external_proxy_conf stream.example "$3" "https://127.0.0.1:$https_port/api/" streaming "$CONF_DIR/external-upstream-tls.conf" 0 '' '' '' '' on "$SSL_DIR/stream.example/fullchain.pem"
 nx_https_transform enable "$CONF_DIR/internal.conf" stream.example "$SSL_DIR" "$4" > "$CONF_DIR/internal-tls.conf"
-build_external_proxy_conf stream.example "$5" "https://127.0.0.1:$https_port/api/" streaming "$CONF_DIR/external-tls.conf" 1
+build_external_proxy_conf stream.example "$5" "https://127.0.0.1:$https_port/api/" streaming "$CONF_DIR/external-tls.conf" 1 '' '' '' '' on "$SSL_DIR/stream.example/fullchain.pem"
 build_proxy_conf normal.example "$6" "$http_port" "$CONF_DIR/normal-internal.conf" normal
 build_external_proxy_conf normal.example "$7" "http://127.0.0.1:$http_port/api/" normal "$CONF_DIR/normal-external.conf"
 '''

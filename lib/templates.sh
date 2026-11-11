@@ -78,6 +78,78 @@ ${stream_block}
 EOF
 }
 
+# Explicit override is useful on nonstandard systems; never silently fall back
+# when an administrator supplied a broken path.
+nx_system_ca_file() {
+  local candidate
+  if [[ -n "${NX_SYSTEM_CA_FILE:-}" ]]; then
+    [[ -f "$NX_SYSTEM_CA_FILE" && -r "$NX_SYSTEM_CA_FILE" && -s "$NX_SYSTEM_CA_FILE" ]] || return 1
+    printf '%s\n' "$NX_SYSTEM_CA_FILE"; return 0
+  fi
+  for candidate in /etc/ssl/certs/ca-certificates.crt /etc/pki/tls/certs/ca-bundle.crt /etc/ssl/cert.pem /etc/pki/ca-trust/extracted/pem/tls-ca-bundle.pem; do
+    [[ -f "$candidate" && -r "$candidate" && -s "$candidate" ]] || continue
+    printf '%s\n' "$candidate"; return 0
+  done
+  return 1
+}
+
+nx_external_tls_policy() {
+  local main="$1" streams="$2" first="$3" verify="${4:-on}" ca="${5:-}"
+  [[ "$verify" == on || "$verify" == off ]] || { error "上游 TLS 校验策略必须为 on 或 off。" >&2; return 1; }
+  # One trust bundle covers all HTTPS locations; combine private/public roots
+  # in that PEM bundle when a site uses both kinds of upstream.
+  if [[ "$verify" == on && ( "$main" == https://* || "$first" == https://* || "$streams" == *https://* ) ]]; then
+    if [[ -z "$ca" ]]; then
+      ca="$(nx_system_ca_file)" || { error "未找到系统 CA bundle；请指定私有 CA PEM 文件，不能自动关闭上游校验。" >&2; return 1; }
+    fi
+  fi
+  if [[ -n "$ca" ]]; then
+    [[ "$ca" =~ ^/[A-Za-z0-9_./+-]+$ && -f "$ca" && -r "$ca" && -s "$ca" ]] || {
+      error "上游 CA 必须为可读非空 PEM 文件的安全绝对路径（不支持空格/配置特殊字符）。" >&2; return 1;
+    }
+    if ! openssl x509 -in "$ca" -noout >/dev/null 2>&1 ||
+       ! openssl crl2pkcs7 -nocrl -certfile "$ca" -outform PEM >/dev/null 2>&1; then
+      error "上游 CA 文件不是有效 PEM 证书 bundle。" >&2; return 1
+    fi
+  fi
+  if [[ "$verify" == off ]]; then
+    warn "警告：已显式关闭上游 TLS 证书校验（proxy_ssl_verify off），存在中间人攻击风险；该选择会持久保存。" >&2
+  fi
+  printf '%s|%s\n' "$verify" "$ca"
+}
+
+nx_external_tls_directives() {
+  [[ "$1" == https://* ]] || return 0
+  printf '        proxy_ssl_verify %s;\n' "$2"
+  if [[ "$2" == on ]]; then
+    printf '        proxy_ssl_trusted_certificate %s;\n        proxy_ssl_verify_depth 5;\n' "$3"
+  else
+    printf '        # WARNING: upstream certificate verification explicitly disabled.\n'
+  fi
+}
+
+# Blank keeps the saved policy; new sites default to verification. Only literal
+# `off` opts out. EOF is cancellation and cannot publish a policy. The builder
+# independently validates every value.
+nx_select_upstream_tls() {
+  local main="$1" streams="$2" current="${3:-on}" ca="${4:-}" choice=""
+  if [[ "$main" == https://* || "$streams" == *https://* ]]; then
+    printf '上游 TLS：默认校验证书；输入 on 使用系统 CA，或私有 CA PEM 绝对路径；off 明确关闭（风险）。当前：%s %s\n' "$current" "$ca" >&2
+    if ! read -rp '上游 TLS 校验（回车保留）: ' choice; then
+      # EOF/cancel is never an implicit publish of a TLS policy.
+      return 10
+    fi
+    case "$choice" in
+      '') ;;
+      on) current=on; ca="" ;;
+      off) current=off; ca="" ;;
+      /*) current=on; ca="$choice" ;;
+      *) error "无效上游 TLS 选择。" >&2; return 1 ;;
+    esac
+  fi
+  nx_external_tls_policy "$main" "$streams" '' "$current" "$ca"
+}
+
 build_external_proxy_conf() {
   local domain="$1"
   local listen_port="$2"
@@ -90,6 +162,7 @@ build_external_proxy_conf() {
   local referer_url="${9:-}"
 
   local stream_upstream_urls="${10:-}"
+  local upstream_tls_verify="${11:-on}" upstream_ca_file="${12:-}" tls_policy
   local main_stream_block=""
   local stream_location_block=""
   local lily_block=""
@@ -149,6 +222,9 @@ build_external_proxy_conf() {
     return 1
   fi
 
+  tls_policy="$(nx_external_tls_policy "$upstream_url" "$stream_upstream_urls" "$stream_upstream_url" "$upstream_tls_verify" "$upstream_ca_file")" || return 1
+  IFS='|' read -r upstream_tls_verify upstream_ca_file <<< "$tls_policy"
+
   https_meta=""
   https_cert_block=""
   if [[ "$https_enabled" == "1" ]]; then
@@ -193,10 +269,11 @@ BLOCK
         fi
 
         stream_sni_block=""
-        if [[ "$external_mode" != "emby_http" ]]; then
+        if [[ "$external_mode" != "emby_http" || "$stream_url" == https://* ]]; then
           stream_sni_block=$(cat <<EOF
         proxy_ssl_server_name on;
         proxy_ssl_name ${stream_host_line};
+$(nx_external_tls_directives "$stream_url" "$upstream_tls_verify" "$upstream_ca_file")
 EOF
 )
         fi
@@ -317,6 +394,8 @@ ${https_meta}
 # upstream_url=${upstream_url}
 # stream_upstream_url=${stream_upstream_url}
 # stream_upstream_urls=${stream_upstream_urls}
+# upstream_tls_verify=${upstream_tls_verify}
+# upstream_ca_file=${upstream_ca_file}
 # source_site_url=${source_site_url}
 # referer_url=${referer_url}
 # nx_frontend_rewrites=true
@@ -348,6 +427,7 @@ ${https_cert_block}
         proxy_http_version 1.1;
 ${main_host_block}
         proxy_ssl_server_name on;
+$(nx_external_tls_directives "$upstream_url" "$upstream_tls_verify" "$upstream_ca_file")
 
 ${main_header_block}
         proxy_set_header Upgrade \$http_upgrade;
@@ -372,6 +452,8 @@ EOF
 # upstream_url=${upstream_url}
 # stream_upstream_url=${stream_upstream_url}
 # stream_upstream_urls=${stream_upstream_urls}
+# upstream_tls_verify=${upstream_tls_verify}
+# upstream_ca_file=${upstream_ca_file}
 # source_site_url=${source_site_url}
 # referer_url=${referer_url}
 # nx_frontend_rewrites=true
@@ -392,6 +474,7 @@ ${ipv6_listen_plain}
         proxy_http_version 1.1;
 ${main_host_block}
         proxy_ssl_server_name on;
+$(nx_external_tls_directives "$upstream_url" "$upstream_tls_verify" "$upstream_ca_file")
 
 ${main_header_block}
         proxy_set_header Upgrade \$http_upgrade;

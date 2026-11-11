@@ -57,7 +57,7 @@ load_email() { ACME_EMAIL=test@example.com; }
 has_dns_config() { return 0; }
 get_dns_issue_args() { echo '--dns dns_cf'; }
 # shellcheck disable=SC2317
-export_dns_env() { :; }
+nx_acme_dns_command() { "$HOME/.acme.sh/acme.sh" "$@"; }
 export FAIL_ISSUE=1
 if _issue_cert_dns example.com; then exit 1; fi
 if grep -q -- --install-cert "$ACME_LOG"; then exit 1; fi
@@ -94,8 +94,9 @@ grep -Fq 'location ^~ /.well-known/acme-challenge/' "$CONF_DIR/site.conf"
 ensure_websocket_map() { :; }
 if build_external_proxy_conf example.com 8080 http://127.0.0.1 normal "$root/bad" 0 '' '' '"; add_header Evil yes; #'; then exit 1; fi
 [[ ! -e "$root/bad" ]]
-# Loading long provider names must export the canonical plugin credentials.
-unset -f export_dns_env
+# Loading long provider names must select canonical plugin credentials only
+# inside the ACME child; no provider environment is left in this shell.
+unset -f nx_acme_dns_command
 saved_fixtures="$(declare -f nx_acme_check_account_identity nx_acme_prepare_webroot nx_acme_privileged_paths nx_acme_prepare_dispatch nx_acme_register_domain nx_acme_account_crontab)"
 # shellcheck disable=SC1091
 source "$(dirname "$0")/../lib/certificates.sh"
@@ -104,9 +105,11 @@ ensure_state_dir() { :; }
 DNS_CONF="$root/dns.conf"
 printf 'DNS_PROVIDER=cloudflare\nDNS_KEY1=test-token\n' > "$DNS_CONF"
 chmod 600 "$DNS_CONF"
-export_dns_env
-# shellcheck disable=SC2154
-[[ "$DNS_PROVIDER" == cf && "$CF_Token" == test-token ]]
+load_dns_conf
+[[ "$DNS_PROVIDER" == cf ]]
+unset CF_Token
+nx_acme_dns_command --version
+[[ ! -v CF_Token ]]
 # Legacy monthly periodic job migrates alongside the daily crontab.
 NX_PERIODIC_DIR="$root/periodic"
 mkdir -p "$NX_PERIODIC_DIR/monthly"

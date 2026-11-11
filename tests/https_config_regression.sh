@@ -35,6 +35,13 @@ export PATH="$MOCK_BIN:$PATH"
 # shellcheck disable=SC1091
 source nx.sh
 nginx_http2_syntax() { echo listen; }
+# This suite uses fake nginx/service commands to exercise configuration
+# transforms and injected failure propagation, not process readiness. Real
+# generation/socket evidence is covered in reload_runtime_regression.sh.
+reload_nginx_safe() {
+  nginx_test || return 1
+  systemctl start nginx
+}
 
 # Make the test deterministic: don't depend on the host kernel IPv6 state.
 ipv6_available() { return 0; }
