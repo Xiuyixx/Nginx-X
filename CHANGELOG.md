@@ -2,6 +2,16 @@
 
 ---
 
+## [3.4.22] - 2026-11-26
+
+### Fixed
+- 流式 AI 反代继续使用 3600 秒的 Nginx 读取/发送超时，但明确说明这不能延长上游自身的 30 秒硬超时。
+- 上游返回 HTML 502/504 网关页时，流式模式改为保留 HTTP 状态并返回 OpenAI 兼容的 JSON 错误，避免 OpenClaw 将 HTML 错误页误判为 AI 服务异常。
+- 为上游网关错误响应增加 `Cache-Control: no-store`，避免错误页被缓存。
+
+### Changed
+- `APP_VERSION`、菜单标题、README 和 bundle 版本同步至 `3.4.22`。
+
 ## [3.4.21] - 2026-11-11
 
 ### Security / Fixed

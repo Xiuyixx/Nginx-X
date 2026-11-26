@@ -165,6 +165,7 @@ build_external_proxy_conf() {
   local upstream_tls_verify="${11:-on}" upstream_ca_file="${12:-}" tls_policy
   local main_stream_block=""
   local stream_location_block=""
+  local stream_error_block=""
   local lily_block=""
   local redirect_block=""
   local main_host_block=""
@@ -241,6 +242,11 @@ EOF
   case "$external_mode" in
     streaming)
       main_stream_block=$'        client_max_body_size 64m;\n        proxy_buffering off;\n        proxy_cache off;'
+      # x17.xyz may return an HTML 504 page after its own ~30s hard timeout.
+      # Normalize that gateway response for OpenAI-compatible clients while
+      # preserving the upstream 504 status. Nginx's long read timeout cannot
+      # extend a timeout enforced by the upstream itself.
+      stream_error_block=$'\n    proxy_intercept_errors on;\n    error_page 502 = @nx_stream_502;\n    error_page 504 = @nx_stream_504;\n\n    location @nx_stream_502 {\n        default_type application/json;\n        add_header Cache-Control "no-store" always;\n        return 502 \'{"error":{"message":"Upstream gateway unavailable","type":"upstream_error","code":"upstream_error"}}\';\n    }\n\n    location @nx_stream_504 {\n        default_type application/json;\n        add_header Cache-Control "no-store" always;\n        return 504 \'{"error":{"message":"Upstream gateway timeout","type":"upstream_error","code":"upstream_timeout"}}\';\n    }'
       ;;
     media)
       main_stream_block=$(cat <<'BLOCK'
@@ -437,6 +443,7 @@ ${main_header_block}
         proxy_send_timeout 3600s;
     }
 ${stream_location_block}
+${stream_error_block}
 }
 EOF
   else
@@ -484,6 +491,7 @@ ${main_header_block}
         proxy_send_timeout 3600s;
     }
 ${stream_location_block}
+${stream_error_block}
 }
 EOF
   fi

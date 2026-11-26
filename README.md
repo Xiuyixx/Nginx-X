@@ -1,6 +1,6 @@
 # Nginx-X
 
-![Version](https://img.shields.io/badge/version-3.4.21-blue)
+![Version](https://img.shields.io/badge/version-3.4.22-blue)
 
 基于 Bash 的 Nginx 交互式管理工具，面向 Ubuntu、Debian、CentOS/RHEL、Alpine 和 OpenWrt。通过数字菜单完成 Nginx 安装升级、反向代理、证书、访问策略、运行检查和安全卸载；所有受管配置变更都会先校验，再尝试重载，失败时恢复事务范围内的文件。
 
@@ -127,9 +127,10 @@ HTTPS 新建和保留式转换会根据实际 Nginx 版本选择 `http2 on;` 或
 client_max_body_size 64m;
 proxy_buffering off;
 proxy_cache off;
+proxy_intercept_errors on;
 ```
 
-Nginx 未另行配置时默认请求体上限为 1 MiB，较长对话、工具结果或 base64 图片可能触发 **413 Request Entity Too Large**，请求尚未进入后端。流式模板改为有限的 **64 MiB（67,108,864 字节）** 上限，超过仍返回 413；这限制的是整个请求体，不是输出长度或 token 数。保留请求缓冲、HTTP/1.1、长超时、WebSocket、鉴权头和原上游路径/查询语义，不将上传改为无限制。上游仍须及时输出/flush。
+Nginx 未另行配置时默认请求体上限为 1 MiB，较长对话、工具结果或 base64 图片可能触发 **413 Request Entity Too Large**，请求尚未进入后端。流式模板改为有限的 **64 MiB（67,108,864 字节）** 上限，超过仍返回 413；这限制的是整个请求体，不是输出长度或 token 数。保留请求缓冲、HTTP/1.1、长超时、WebSocket、鉴权头和原上游路径/查询语义，不将上传改为无限制。上游仍须及时输出/flush。外部流式上游如果像 x17.xyz 一样在约 30 秒后自行返回 HTML 504，Nginx 的 3600 秒读取超时无法延长上游网关的硬超时；本模板会拦截外部流式反代的 502/504，将其保留为对应 HTTP 状态并规范化为不缓存的 OpenAI 兼容 JSON，避免把 HTML 错误页直接交给 OpenClaw。它不能把上游 504 变成成功响应，也不对已开始输出的 SSE 做不安全重试；根治仍需上游将 relay/read timeout 提高到至少 120 秒。
 
 **已有站点不会因更新脚本而自动改写配置。** 更新脚本后，进入 **2) 配置管理 → 3) 配置列表 → 选择站点 → 3) 修改参数**，确认域名、端口和上游不变，保留/选择流式模式并保存，才会应用新上限；已有流式站点在模式处回车即可。配置测试或重载失败仍回滚。已开启后端直连保护时，保持同一配置路径、后端端口和访问策略，由原事务校验并更新保护指纹；不要为升级上限改名、修改后端或解除保护。
 
